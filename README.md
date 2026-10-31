@@ -1,6 +1,3 @@
-# zest
-A blazing fast, GPU-accelerated immediate mode GUI library for Rust.
-
 # Zest 🍋
 
 **Zest** is a lightweight, blazing fast, GPU-accelerated immediate mode GUI library for Rust. .
