@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/zest-core", "demos/headless"]
+exclude = ["examples/gpui", "examples/egui", "examples/imgui", "examples/dear-imgui-rs"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std"] }
+zest-core = { path = "crates/zest-core" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[package]
+name = "zest"
+description = "A hybrid Rust GUI engine — early foundation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zest-core.workspace = true
+
+[lints]
+workspace = true
