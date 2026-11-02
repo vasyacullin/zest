@@ -89,7 +89,7 @@ measurement calls, rather than total node visits.
 
 The headless `zest-layout-demo` checks reorder identity, focus/hover, fractional
 bounds, snapshot/cache reuse and explicit conversion of layout bounds into quads.
-The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout, scrolling,
+The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout,
 automatic scene paint extraction and general widget event routing remain future
 work; this is the first layout slice, not a complete widget system.
 
@@ -107,7 +107,7 @@ node's border bounds, in logical coordinates. It affects both axes and propagate
 through nonclipping descendants. A nonclipping parent permits overflow; an empty
 clipping parent hides its descendants. Every `LayoutBox::clip` includes the
 viewport and all clipping ancestors. It does not clip the node's own paint to its
-own bounds. Raw `bounds` keep their layout size/position, while
+own bounds. Clipping alone leaves `bounds` unchanged, while
 `LayoutSnapshot::visible_bounds(id)` (also on `LayoutBox`) returns their visible
 intersection, or None for empty/fully clipped/unknown nodes.
 
@@ -123,11 +123,33 @@ for node in snapshot.boxes() {
 }
 ```
 
-Clipping alone creates a new immutable snapshot without rerunning Taffy or text
-measurement (`ComputeStats::performed == false`). Unchanged clip settings reuse
+Clipping/scrolling alone creates a new immutable snapshot without rerunning Taffy or text
+measurement (`ComputeStats::performed == false`). Unchanged settings reuse
 the same snapshot. Geometry/style changes still use the normal layout caches.
-Old snapshots retain their original clips. Clipping does not scroll content or
-add rounded masks; applications still filter interaction eligibility themselves.
+Old snapshots retain their original clips/positions. Rounded masks are not
+supported; applications still filter interaction eligibility themselves.
+
+`Style::scroll_offset: Point<Logical>` requests a nonnegative, finite content
+offset for a clipping container. Its descendants move by the negative offset;
+the container's own border and clip stay fixed. Both axes are supported. Offsets
+are inert when `clip_children` is false. `LayoutSnapshot::scroll(id)` (also the
+`LayoutBox::scroll` field) returns `ScrollMetrics { offset, max_offset }` with the
+applied, clamped position and maximum allowed position. Oversized finite requests
+are safe; invalid requests reject the whole sync before mutation.
+
+Ranges include positive descendant overflow and trailing padding. Overflow flows
+through nonclipping descendants but stops at a clipping child's border; nested
+scrollers calculate independent ranges from unscrolled layout. Resizing/content
+changes recompute those ranges and reclamp requested positions. Empty containers
+have no range. This initial implementation does not expose negative overflow
+before the origin, scrollbars, touch gestures or automatic focus revelation.
+Wrap text in a container to scroll it; a leaf's own bitmap is not scroll content.
+
+`LayoutBox::layout_bounds` retains absolute unscrolled geometry; `bounds` contains
+the projected position after all ancestor scrolling. Paint, clips, visible bounds
+and hit testing use that same projection. Sizes/text measurement stay unchanged.
+The core scene remains geometry-independent: update eligibility/cancel gestures
+from current snapshots when scrolling or restoring focus.
 
 Enable the facade's `layout-text` feature (or `zest-layout/text`) to connect
 shaped text to Flexbox leaves. Create `TextContent::new(raster.shape(text,
@@ -180,8 +202,16 @@ overflow again. Text and the marker keep the same layout bounds and textures.
 Paint, pointer hits, Tab and restored focus use the same effective ancestor clip;
 visible slivers narrower/shorter than one physical pixel are ineligible. Changing
 clips cancels pending gestures and re-hits a stationary pointer before more input.
+While F4 clipping is enabled, the wheel scrolls the column under the pointer.
+Line deltas use 36 logical pixels; touchpad pixels are divided by window DPI.
+Shift redirects vertical-only deltas horizontally; unsupported modifiers and
+nonfinite deltas are ignored. Positions clamp at the ends; boundary no-ops reuse
+the snapshot. Modal scopes accept wheel input only over eligible content, and a
+disabled/unfocused column rejects it. Scrolling re-hits a stationary pointer and
+cancels gestures; fully hidden focus is cleared. Resizing reclamps the position;
+turning F4 off resets it. Text paragraphs and GPU images stay reusable.
 Fully clipped or subpixel-sized targets are skipped. Geometry is refreshed before
-pointer/keyboard input, and resize re-hits a stationary pointer. DPI changes discard
+pointer/keyboard/wheel input, and resize re-hits a stationary pointer. DPI changes discard
 stale pointer coordinates; focus remains on the keyed node while it is visible.
 Focus loss clears hover/focus/modifiers and resets pending gestures. Geometry,
 DPI, occlusion and Tab changes cancel a pending gesture without activating it.

@@ -10,6 +10,7 @@ use zest::{
 mod clip_checks;
 mod interaction_checks;
 mod modal_checks;
+mod scroll_checks;
 
 const CLIP_HEIGHT: f64 = 96.25;
 
@@ -40,6 +41,7 @@ pub(super) struct LayoutDemo {
     activation: ActivationState,
     selected: Option<WidgetId>,
     clipped: bool,
+    scroll_offset: Point<Logical>,
     window_focused: bool,
     modifiers: winit::keyboard::ModifiersState,
     pub tint: [f32; 4],
@@ -88,6 +90,7 @@ impl LayoutDemo {
             activation: ActivationState::default(),
             selected: None,
             clipped: false,
+            scroll_offset: Point::new(0.0, 0.0),
             window_focused: true,
             modifiers: winit::keyboard::ModifiersState::empty(),
             tint: [1.0; 4],
@@ -186,6 +189,7 @@ impl LayoutDemo {
                         width: Length::Px(column as f32),
                         height: Length::Px(CLIP_HEIGHT as f32),
                         clip_children: self.clipped,
+                        scroll_offset: self.scroll_offset,
                         padding: Edges::all(24.0),
                         gap: 16.0,
                         shrink: 0.0,
@@ -218,6 +222,7 @@ impl LayoutDemo {
             }
         })?;
         let snapshot = self.tree.compute(viewport)?.snapshot;
+        self.scroll_offset = snapshot.scroll(&self.root).unwrap_or_default().offset;
         let mut changed = self
             .snapshot
             .as_ref()
@@ -335,15 +340,81 @@ impl LayoutDemo {
             return false;
         };
         let scale = self.scale.unwrap();
+        let previous_scroll = self.scroll_offset;
         self.clipped = !self.clipped;
+        if !self.clipped {
+            self.scroll_offset = Point::new(0.0, 0.0);
+        }
         match self.update_geometry(viewport, scale) {
             Ok(_) => true,
             Err(error) => {
                 self.clipped = !self.clipped;
+                self.scroll_offset = previous_scroll;
                 eprintln!("Layout clip change rejected: {error}");
                 false
             }
         }
+    }
+    /// Wheel deltas move content, opposite to its offset. As in the editor,
+    /// lines use 36 logical pixels and touchpad deltas use physical pixels.
+    pub fn wheel(
+        &mut self,
+        delta: winit::event::MouseScrollDelta,
+        scale: ScaleFactor,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if !self.window_focused || !self.clipped || self.unsupported_modifiers() {
+            return Ok(false);
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return Ok(false);
+        };
+        let Some(pointer) = self.pointer else {
+            return Ok(false);
+        };
+        if !snapshot
+            .visible_bounds(&self.root)
+            .is_some_and(|bounds| bounds.contains(pointer))
+            || self
+                .scene
+                .state(&self.root)
+                .is_none_or(|state| !state.enabled())
+            || (self.modal_active() && self.hit(pointer).is_none())
+        {
+            return Ok(false);
+        }
+        let (mut x, mut y) = match delta {
+            winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                (f64::from(x) * 36.0, f64::from(y) * 36.0)
+            }
+            winit::event::MouseScrollDelta::PixelDelta(point) => {
+                (point.x / scale.get(), point.y / scale.get())
+            }
+        };
+        if !x.is_finite() || !y.is_finite() {
+            return Ok(false);
+        }
+        if self.modifiers.shift_key() && x == 0.0 {
+            x = y;
+            y = 0.0;
+        }
+        let metrics = snapshot.scroll(&self.root).unwrap();
+        let next = Point::new(
+            (metrics.offset.x - x.clamp(-metrics.max_offset.x, metrics.max_offset.x))
+                .clamp(0.0, metrics.max_offset.x),
+            (metrics.offset.y - y.clamp(-metrics.max_offset.y, metrics.max_offset.y))
+                .clamp(0.0, metrics.max_offset.y),
+        );
+        if next == metrics.offset {
+            return Ok(false);
+        }
+        let viewport = snapshot.viewport();
+        let previous = self.scroll_offset;
+        self.scroll_offset = next;
+        if let Err(error) = self.update_geometry(viewport, self.scale.unwrap()) {
+            self.scroll_offset = previous;
+            return Err(error);
+        }
+        Ok(true)
     }
     pub fn pointer_moved(&mut self, point: Point<Logical>) -> bool {
         if !self.window_focused || !point.x.is_finite() || !point.y.is_finite() {
@@ -697,6 +768,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     }
     interaction_checks::check(&mut demo, renderer)?;
     clip_checks::check(&mut demo, renderer)?;
+    scroll_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -748,5 +820,7 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
     )
 }
 
+#[cfg(test)]
+mod scroll_tests;
 #[cfg(test)]
 mod tests;

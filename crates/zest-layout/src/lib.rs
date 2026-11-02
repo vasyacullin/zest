@@ -21,9 +21,11 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 mod hit_test;
+mod scroll;
 mod style;
 #[cfg(feature = "text")]
 mod text;
+pub use scroll::ScrollMetrics;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -35,7 +37,7 @@ use taffy::{AvailableSpace, NodeId, TaffyTree};
 pub use text::TextContent;
 use zest_core::{
     Scene, WidgetId,
-    geometry::{Logical, Rect, Size},
+    geometry::{Logical, Point, Rect, Size},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,8 +105,13 @@ pub struct ComputeStats {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutBox {
     pub id: WidgetId,
-    /// Absolute, unrounded logical bounds relative to the viewport origin.
+    /// Absolute, unrounded logical bounds after ancestor scrolling, relative to
+    /// the viewport origin. Used for painting, clipping and hit testing.
     pub bounds: Rect<Logical>,
+    /// Absolute bounds before scrolling. Sizes match `bounds`; positions remain
+    /// stable when only clip/scroll properties change.
+    pub layout_bounds: Rect<Logical>,
+    pub scroll: ScrollMetrics,
     /// Effective viewport/ancestor clip. An empty rectangle hides all paint and
     /// hits for this node. A node's own `clip_children` affects descendants only.
     pub clip: Rect<Logical>,
@@ -144,6 +151,12 @@ impl LayoutSnapshot {
             .index
             .get(id)
             .and_then(|&index| self.0.boxes[index].visible_bounds())
+    }
+    pub fn scroll(&self, id: &WidgetId) -> Option<ScrollMetrics> {
+        self.0
+            .index
+            .get(id)
+            .map(|&index| self.0.boxes[index].scroll)
     }
     pub fn same_snapshot(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -406,7 +419,7 @@ impl LayoutTree {
     }
     /// Computes an unrounded snapshot, reusing retained Taffy caches. Identical
     /// inputs return the very same snapshot without calling the layout engine.
-    /// Clip-only changes rebuild the snapshot from retained geometry without
+    /// Clip/scroll-only changes rebuild the snapshot from retained geometry without
     /// calling Taffy or measuring leaves (`stats.performed == false`).
     pub fn compute(&mut self, viewport: Size<Logical>) -> Result<ComputedLayout, LayoutError> {
         if !style::valid_size(viewport) {
@@ -514,6 +527,15 @@ impl LayoutTree {
         }
         let mut boxes: Vec<LayoutBox> = Vec::with_capacity(self.order.len());
         let mut index: HashMap<WidgetId, usize> = HashMap::with_capacity(self.order.len());
+        let scroll_metrics = match self.scroll_metrics() {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                self.tree
+                    .mark_dirty(self.root)
+                    .expect("owned viewport node");
+                return Err(error);
+            }
+        };
         let viewport_clip = Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height);
         for id in &self.order {
             let entry = &self.entries[id];
@@ -521,14 +543,19 @@ impl LayoutTree {
                 .tree
                 .layout(entry.node)
                 .expect("owned computed layout node");
-            let (x, y) = entry
+            let (x, y, layout_x, layout_y) = entry
                 .parent
                 .as_ref()
                 .map(|parent| {
-                    let bounds = boxes[*index.get(parent).expect("parent precedes child")].bounds;
-                    (bounds.origin.x, bounds.origin.y)
+                    let parent = &boxes[*index.get(parent).expect("parent precedes child")];
+                    (
+                        parent.bounds.origin.x - parent.scroll.offset.x,
+                        parent.bounds.origin.y - parent.scroll.offset.y,
+                        parent.layout_bounds.origin.x,
+                        parent.layout_bounds.origin.y,
+                    )
                 })
-                .unwrap_or((0.0, 0.0));
+                .unwrap_or((0.0, 0.0, 0.0, 0.0));
             let bounds = Rect::from_xywh(
                 x + f64::from(layout.location.x),
                 y + f64::from(layout.location.y),
@@ -565,6 +592,13 @@ impl LayoutTree {
             boxes.push(LayoutBox {
                 id: id.clone(),
                 bounds,
+                layout_bounds: Rect::from_xywh(
+                    layout_x + f64::from(layout.location.x),
+                    layout_y + f64::from(layout.location.y),
+                    bounds.size.width,
+                    bounds.size.height,
+                ),
+                scroll: scroll_metrics[id],
                 clip,
             });
         }

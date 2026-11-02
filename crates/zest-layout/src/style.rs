@@ -1,4 +1,4 @@
-use zest_core::geometry::{Logical, Size};
+use zest_core::geometry::{Logical, Point, Size};
 
 /// Dimensions use logical pixels; percentage values are fractions (0.5 = 50%).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -68,6 +68,9 @@ pub struct Style {
     /// Clip descendants to this node's border bounds. Does not change layout or
     /// clip this node's own paint; viewport/ancestor clips still apply to it.
     pub clip_children: bool,
+    /// Requested positive content scroll in logical pixels. Applied to children
+    /// only when `clip_children` is true, clamped to the computed scroll range.
+    pub scroll_offset: Point<Logical>,
 }
 impl Default for Style {
     fn default() -> Self {
@@ -84,6 +87,7 @@ impl Default for Style {
             align: Align::Stretch,
             justify: Justify::Start,
             clip_children: false,
+            scroll_offset: Point::new(0.0, 0.0),
         }
     }
 }
@@ -96,13 +100,23 @@ impl Style {
     pub(crate) fn same_layout(self, other: Self) -> bool {
         Self {
             clip_children: false,
+            scroll_offset: Point::new(0.0, 0.0),
             ..self
         } == Self {
             clip_children: false,
+            scroll_offset: Point::new(0.0, 0.0),
             ..other
         }
     }
     pub(crate) fn invalid_field(self) -> Option<&'static str> {
+        for (field, value) in [
+            ("scroll_offset.x", self.scroll_offset.x),
+            ("scroll_offset.y", self.scroll_offset.y),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Some(field);
+            }
+        }
         for (field, length) in [("width", self.width), ("height", self.height)] {
             match length {
                 Length::Auto => {}

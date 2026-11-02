@@ -49,11 +49,15 @@ mod tests {
                 LayoutBox {
                     id: a.clone(),
                     bounds: bounds[0],
+                    layout_bounds: bounds[0],
+                    scroll: ScrollMetrics::default(),
                     clip: Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height),
                 },
                 LayoutBox {
                     id: b.clone(),
                     bounds: bounds[1],
+                    layout_bounds: bounds[1],
+                    scroll: ScrollMetrics::default(),
                     clip: Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height),
                 },
             ],
