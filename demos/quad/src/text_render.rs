@@ -1,8 +1,8 @@
 use super::text_input::{KeyResult, TextInput};
 use super::*;
 use winit::{
-    event::Ime,
-    keyboard::{Key, ModifiersState, PhysicalKey},
+    event::{Ime, MouseScrollDelta},
+    keyboard::{Key, ModifiersState, NamedKey, PhysicalKey},
 };
 use zest::{
     paint::Painter,
@@ -17,6 +17,13 @@ const SAMPLE: &str = "Zest • Привет, мир!\noffice e\u{301} • الع
 pub(super) const FIELD: Rect<Logical> = Rect::from_xywh(288.0, 272.0, 344.0, 84.0);
 const VIEW_WIDTH: f64 = 320.0;
 const VIEW_HEIGHT: f64 = 68.0;
+const VIEW: Rect<Logical> = Rect::from_xywh(300.0, 280.0, VIEW_WIDTH, VIEW_HEIGHT);
+
+#[derive(Clone, Copy)]
+struct Drag {
+    anchor: usize,
+    pointer: Point<Logical>,
+}
 
 pub(super) struct TextDemo {
     raster: Rasterizer,
@@ -26,6 +33,8 @@ pub(super) struct TextDemo {
     pub input: TextInput,
     scroll_x: f64,
     scroll_y: f64,
+    follow_caret: bool,
+    drag: Option<Drag>,
 }
 impl TextDemo {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -42,12 +51,16 @@ impl TextDemo {
             input: TextInput::new(SAMPLE),
             scroll_x: 0.0,
             scroll_y: 0.0,
+            follow_caret: true,
+            drag: None,
         })
     }
     pub fn reset(&mut self) {
         self.image = None;
         self.uploaded = false;
         self.input.focus(false);
+        self.end_drag();
+        self.follow_caret = true;
     }
     fn options(scale: f32) -> RasterOptions {
         RasterOptions {
@@ -75,6 +88,10 @@ impl TextDemo {
         let mut next = self.input.clone();
         let result = action(&mut next)?;
         let display = next.buffer.display_text();
+        let follow_caret = self.input.buffer.text() != next.buffer.text()
+            || self.input.buffer.display_selection() != next.buffer.display_selection()
+            || self.input.buffer.preedit_range() != next.buffer.preedit_range()
+            || self.paragraph.text() != display;
         if self.paragraph.text() != display {
             self.paragraph = self.raster.paragraph(
                 &display,
@@ -84,6 +101,7 @@ impl TextDemo {
             self.uploaded = false;
         }
         self.input = next;
+        self.follow_caret |= follow_caret;
         Ok(result)
     }
     pub fn key(
@@ -93,7 +111,8 @@ impl TextDemo {
         pressed: bool,
         synthetic: bool,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
-        self.edit(|input| input.key(key, text, pressed, synthetic))
+        let result = self.edit(|input| input.key(key, text, pressed, synthetic))?;
+        self.finish_key(key, pressed, synthetic, result)
     }
     pub fn key_physical(
         &mut self,
@@ -103,42 +122,268 @@ impl TextDemo {
         pressed: bool,
         synthetic: bool,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
-        self.edit(|input| input.key_physical(key, physical, text, pressed, synthetic))
+        let result =
+            self.edit(|input| input.key_physical(key, physical, text, pressed, synthetic))?;
+        self.finish_key(key, pressed, synthetic, result)
+    }
+    fn finish_key(
+        &mut self,
+        key: &Key,
+        pressed: bool,
+        synthetic: bool,
+        mut result: KeyResult,
+    ) -> Result<KeyResult, Box<dyn std::error::Error>> {
+        // End at the document end (or Backspace at its start) still needs to
+        // reveal an offscreen caret after manual scrolling, without a text edit.
+        let navigation = matches!(
+            key,
+            Key::Named(
+                NamedKey::Home
+                    | NamedKey::End
+                    | NamedKey::ArrowLeft
+                    | NamedKey::ArrowRight
+                    | NamedKey::Backspace
+                    | NamedKey::Delete
+            )
+        );
+        let blocked = self.input.modifiers.super_key()
+            || (self.input.modifiers.control_key() && !self.input.modifiers.alt_key());
+        if !result.changed
+            && navigation
+            && pressed
+            && !synthetic
+            && !blocked
+            && self.input.focused
+            && self.input.buffer.preedit().is_none()
+        {
+            let before = (self.scroll_x, self.scroll_y);
+            self.follow_caret = true;
+            self.update_view()?;
+            result.changed = before != (self.scroll_x, self.scroll_y);
+        }
+        if result.changed || result.close {
+            self.end_drag();
+        }
+        Ok(result)
     }
     pub fn ime(&mut self, ime: &Ime) -> Result<bool, Box<dyn std::error::Error>> {
-        self.edit(|input| input.ime(ime))
+        let changed = self.edit(|input| input.ime(ime))?;
+        if matches!(ime, Ime::Preedit(text, _) if !text.is_empty()) || matches!(ime, Ime::Commit(_))
+        {
+            self.end_drag();
+        }
+        Ok(changed)
     }
     pub fn focus(&mut self, focused: bool) -> bool {
-        self.input.focus(focused)
+        let composing = self.input.buffer.preedit().is_some();
+        let changed = self.input.focus(focused);
+        if !focused {
+            self.end_drag();
+        }
+        if (focused && changed) || composing {
+            self.follow_caret = true;
+        }
+        changed
     }
     pub fn modifiers(&mut self, modifiers: ModifiersState) {
         self.input.modifiers = modifiers;
     }
     pub fn cancel_composition(&mut self) {
-        self.input.cancel_composition();
+        self.follow_caret |= self.input.cancel_composition();
+        self.end_drag();
     }
-    pub fn click(
+    pub fn begin_drag(
         &mut self,
         point: Point<Logical>,
         extend: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return Err(zest::text::raster::RasterError::InvalidOptions.into());
+        }
         self.input.cancel_composition();
         self.input.focus(true);
         self.refresh(self.paragraph.bitmap().scale)?;
-        let offset = self.paragraph.hit_test(
-            point.x - 300.0 + self.scroll_x,
-            point.y - 280.0 + self.scroll_y,
-        )?;
-        self.edit(|input| {
-            input.buffer.set_selection(Selection::new(
-                if extend {
-                    input.buffer.selection().anchor
-                } else {
-                    offset
-                },
-                offset,
-            ))
-        })?;
+        self.clamp_scroll();
+        let offset = self.pointer_offset(point)?;
+        self.input.buffer.set_selection(Selection::new(
+            if extend {
+                self.input.buffer.selection().anchor
+            } else {
+                offset
+            },
+            offset,
+        ))?;
+        self.drag = Some(Drag {
+            anchor: self.input.buffer.selection().anchor,
+            pointer: point,
+        });
+        self.follow_caret = false;
+        Ok(())
+    }
+    fn pointer_offset(
+        &self,
+        point: Point<Logical>,
+    ) -> Result<usize, zest::text::raster::RasterError> {
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return Err(zest::text::raster::RasterError::InvalidOptions);
+        }
+        self.paragraph.hit_test(
+            point
+                .x
+                .clamp(VIEW.origin.x, VIEW.origin.x + VIEW_WIDTH - 0.5)
+                - VIEW.origin.x
+                + self.scroll_x,
+            point
+                .y
+                .clamp(VIEW.origin.y, VIEW.origin.y + VIEW_HEIGHT - 0.5)
+                - VIEW.origin.y
+                + self.scroll_y,
+        )
+    }
+    pub fn drag_to(&mut self, point: Point<Logical>) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some(drag) = self.drag else {
+            return Ok(false);
+        };
+        let offset = self.pointer_offset(point)?;
+        let changed = self
+            .input
+            .buffer
+            .set_selection(Selection::new(drag.anchor, offset))?;
+        self.drag = Some(Drag {
+            pointer: point,
+            ..drag
+        });
+        self.follow_caret = false;
+        Ok(changed)
+    }
+    pub fn end_drag(&mut self) {
+        self.drag = None;
+    }
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+    fn scroll_limit(&self) -> (f64, f64) {
+        let (width, height) = self.paragraph.content_size();
+        (
+            (width - VIEW_WIDTH).max(0.0),
+            (height - VIEW_HEIGHT).max(0.0),
+        )
+    }
+    fn clamp_scroll(&mut self) {
+        let (x, y) = self.scroll_limit();
+        self.scroll_x = self.scroll_x.clamp(0.0, x);
+        self.scroll_y = self.scroll_y.clamp(0.0, y);
+    }
+    fn scroll_by(&mut self, dx: f64, dy: f64) -> bool {
+        let before = (self.scroll_x, self.scroll_y);
+        self.scroll_x += dx;
+        self.scroll_y += dy;
+        self.clamp_scroll();
+        before != (self.scroll_x, self.scroll_y)
+    }
+    /// Wheel deltas describe movement of the content, opposite the scroll offset.
+    /// Line deltas use 36 logical pixels; touchpad deltas use physical pixels.
+    pub fn wheel(
+        &mut self,
+        delta: MouseScrollDelta,
+        scale: ScaleFactor,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let (mut x, mut y) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => (f64::from(x) * 36.0, f64::from(y) * 36.0),
+            MouseScrollDelta::PixelDelta(point) => (point.x / scale.get(), point.y / scale.get()),
+        };
+        if !x.is_finite() || !y.is_finite() || (x == 0.0 && y == 0.0) {
+            return Ok(false);
+        }
+        if self.input.modifiers.shift_key() && x == 0.0 {
+            x = y;
+            y = 0.0;
+        }
+        self.follow_caret = false;
+        let scrolled = self.scroll_by(-x, -y);
+        let selected = if let Some(drag) = self.drag {
+            self.drag_to(drag.pointer)?
+        } else {
+            false
+        };
+        Ok(scrolled || selected)
+    }
+    fn drag_velocity(&self) -> (f64, f64) {
+        let Some(drag) = self.drag else {
+            return (0.0, 0.0);
+        };
+        let axis = |point: f64, start: f64, end: f64| {
+            if point < start {
+                ((point - start) * 12.0).max(-720.0)
+            } else if point >= end {
+                ((point - end + 1.0) * 12.0).min(720.0)
+            } else {
+                0.0
+            }
+        };
+        let (max_x, max_y) = self.scroll_limit();
+        let x = axis(drag.pointer.x, VIEW.origin.x, VIEW.origin.x + VIEW_WIDTH);
+        let y = axis(drag.pointer.y, VIEW.origin.y, VIEW.origin.y + VIEW_HEIGHT);
+        let movable = |velocity: f64, offset: f64, max: f64| {
+            if (velocity < 0.0 && offset > 0.0) || (velocity > 0.0 && offset < max) {
+                velocity
+            } else {
+                0.0
+            }
+        };
+        (
+            movable(x, self.scroll_x, max_x),
+            movable(y, self.scroll_y, max_y),
+        )
+    }
+    pub fn autoscroll_active(&self) -> bool {
+        self.drag_velocity() != (0.0, 0.0)
+    }
+    /// Deterministic elapsed-time step, bounded after stalls. The event loop
+    /// schedules ticks only while a drag can scroll beyond a viewport edge.
+    pub fn drag_scroll(&mut self, seconds: f64) -> Result<bool, Box<dyn std::error::Error>> {
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Ok(false);
+        }
+        let (x, y) = self.drag_velocity();
+        let scrolled = self.scroll_by(x * seconds.min(0.1), y * seconds.min(0.1));
+        let selected = if let Some(drag) = self.drag {
+            self.drag_to(drag.pointer)?
+        } else {
+            false
+        };
+        Ok(scrolled || selected)
+    }
+    fn display_head(&self) -> usize {
+        self.input
+            .buffer
+            .display_selection()
+            .map(|s| s.head)
+            .unwrap_or_else(|| {
+                self.input
+                    .buffer
+                    .preedit_range()
+                    .map_or(self.input.buffer.selection().head, |r| r.end)
+            })
+    }
+    fn update_view(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.clamp_scroll();
+        if std::mem::take(&mut self.follow_caret) {
+            let caret = self.paragraph.caret(self.display_head())?;
+            if caret.x < self.scroll_x {
+                self.scroll_x = caret.x;
+            }
+            if caret.x + caret.width > self.scroll_x + VIEW_WIDTH {
+                self.scroll_x = caret.x + caret.width - VIEW_WIDTH;
+            }
+            if caret.y < self.scroll_y {
+                self.scroll_y = caret.y;
+            }
+            if caret.y + caret.height > self.scroll_y + VIEW_HEIGHT {
+                self.scroll_y = caret.y + caret.height - VIEW_HEIGHT;
+            }
+            self.clamp_scroll();
+        }
         Ok(())
     }
     pub fn prepare(
@@ -155,24 +400,7 @@ impl TextDemo {
             }
             self.uploaded = true;
         }
-        if let Some(selection) = self.input.buffer.display_selection() {
-            let caret = self.paragraph.caret(selection.head)?;
-            if caret.x < self.scroll_x {
-                self.scroll_x = caret.x;
-            }
-            if caret.x + caret.width > self.scroll_x + VIEW_WIDTH {
-                self.scroll_x = caret.x + caret.width - VIEW_WIDTH;
-            }
-            if caret.y < self.scroll_y {
-                self.scroll_y = caret.y;
-            }
-            if caret.y + caret.height > self.scroll_y + VIEW_HEIGHT {
-                self.scroll_y = caret.y + caret.height - VIEW_HEIGHT;
-            }
-        }
-        self.scroll_x = self.scroll_x.max(0.0);
-        self.scroll_y = self.scroll_y.max(0.0);
-        Ok(())
+        self.update_view()
     }
     fn rect(&self, rect: TextRect) -> Rect<Logical> {
         Rect::from_xywh(
@@ -183,18 +411,7 @@ impl TextDemo {
         )
     }
     pub fn ime_area(&self) -> Option<Rect<Logical>> {
-        let offset = self
-            .input
-            .buffer
-            .display_selection()
-            .map(|s| s.head)
-            .unwrap_or_else(|| {
-                self.input
-                    .buffer
-                    .preedit_range()
-                    .map_or(self.input.buffer.selection().head, |r| r.end)
-            });
-        let caret = self.paragraph.caret(offset).ok()?;
+        let caret = self.paragraph.caret(self.display_head()).ok()?;
         let rect = self.rect(caret);
         let height = rect.size.height.clamp(1.0, VIEW_HEIGHT);
         Some(Rect::from_xywh(
@@ -480,38 +697,82 @@ pub(super) fn check_editor(renderer: &mut Renderer) -> Result<(), Box<dyn std::e
         return Err("focus loss committed stale IME text".into());
     }
     capture_editor(&editor, renderer)?;
+    editor.focus(true);
+    editor.edit(|input| {
+        input.buffer.select_all()?;
+        input.buffer.insert(&"     \n".repeat(10))
+    })?;
+    editor.prepare(renderer, 1.25)?;
+    let image = editor.image;
+    let staged = renderer.upload_stats().staged_bytes;
+    let history = editor.input.buffer.history_stats();
+    editor.wheel(
+        MouseScrollDelta::LineDelta(0.0, 1e6),
+        ScaleFactor::new(1.25)?,
+    )?;
+    editor.prepare(renderer, 1.25)?;
+    if editor.scroll_y != 0.0 {
+        return Err("manual scroll snapped back to the caret on redraw".into());
+    }
+    let caret = editor.paragraph.caret(0)?;
+    editor.begin_drag(Point::new(300.1, 280.0 + caret.height * 0.5), false)?;
+    editor.drag_to(Point::new(310.0, 355.0))?;
+    for _ in 0..10 {
+        editor.drag_scroll(0.05)?;
+    }
+    editor.end_drag();
+    let selection = editor.input.buffer.selection();
+    if selection.anchor != 0
+        || selection.is_caret()
+        || editor.scroll_y <= 0.0
+        || editor.autoscroll_active()
+    {
+        return Err(
+            "drag selection/autoscroll did not retain its anchor or stop on release".into(),
+        );
+    }
+    editor.prepare(renderer, 1.25)?;
+    let capture = capture_editor(&editor, renderer)?;
+    let selected = editor
+        .paragraph
+        .selection_rects(selection)?
+        .into_iter()
+        .map(|rect| editor.rect(rect))
+        .filter_map(|rect| rect.intersection(&VIEW))
+        .find(|rect| rect.size.width > 2.0 && rect.size.height > 2.0)
+        .ok_or("drag selection has no visible highlight")?;
+    expect_pixel(
+        &capture,
+        ((selected.origin.x + selected.size.width * 0.5) * 1.25).floor() as u32,
+        ((selected.origin.y + selected.size.height * 0.5) * 1.25).floor() as u32,
+        [63, 124, 179, 255],
+    )?;
+    expect_pixel(&capture, 370, 355, [33, 44, 56, 255])?; // padding outside the clipped viewport
+    let before = editor.scroll_y;
+    editor.wheel(
+        MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 20.0)),
+        ScaleFactor::new(1.25)?,
+    )?;
+    editor.prepare(renderer, 1.25)?;
+    capture_editor(&editor, renderer)?;
+    if (editor.scroll_y - (before - 16.0).max(0.0)).abs() > 1e-9
+        || editor.input.buffer.selection() != selection
+        || editor.input.buffer.history_stats() != history
+        || editor.image != image
+        || renderer.upload_stats().staged_bytes != staged
+    {
+        return Err("wheel/drag changed model history, uploaded text again or lost fractional-DPI scrolling".into());
+    }
     renderer.remove_image(editor.image.unwrap())?;
     renderer.wait_idle()?;
     if renderer.image_stats().live != live || renderer.image_stats().retired != 0 {
         return Err("editor image replacement leaked textures".into());
     }
     println!(
-        "GPU editor checks passed: selection/caret/preedit pixels, no upload on selection, IME commit/undo, caret scrolling, focus cancellation and texture retirement"
+        "GPU editor checks passed: selection/caret/preedit pixels, drag/wheel at fractional DPI without texture uploads, IME commit/undo, caret/drag scrolling, focus cancellation and texture retirement"
     );
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn paragraph_rejection_preserves_document_selection_history_and_snapshot() {
-        let mut editor = TextDemo::new().unwrap();
-        editor.focus(true);
-        editor.edit(|input| input.buffer.insert("!")).unwrap();
-        let before = editor.input.buffer.text().to_owned();
-        let selection = editor.input.buffer.selection();
-        let history = editor.input.buffer.history_stats();
-        assert!(
-            editor
-                .edit(|input| input.buffer.insert(&"\n".repeat(5000)))
-                .is_err()
-        );
-        assert_eq!(editor.input.buffer.text(), before);
-        assert_eq!(editor.paragraph.text(), before);
-        assert_eq!(editor.input.buffer.selection(), selection);
-        assert_eq!(editor.input.buffer.history_stats(), history);
-        editor.edit(|input| input.buffer.undo()).unwrap();
-        assert_eq!(editor.input.buffer.text(), SAMPLE);
-    }
-}
+mod tests;

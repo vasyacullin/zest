@@ -54,6 +54,7 @@ struct App {
     frames: usize,
     hovered: bool,
     cursor: Option<Point<Logical>>,
+    drag_tick: Option<Instant>,
     resized: bool,
     resize_observed: bool,
     zero_checked: bool,
@@ -412,7 +413,7 @@ impl ApplicationHandler for App {
             self.demo_image = Some(renderer.upload_rgba8(16, 16, &pixels)?);
             println!("Adapter: {}", renderer.adapter_name());
             println!(
-                "Click the text field and type; Shift+arrows select, Ctrl/Cmd+A/Z/Y select/undo/redo. Home/End move to document ends. Esc cancels composition, then closes."
+                "Click and drag in the text field; the wheel scrolls, Shift+wheel scrolls horizontally. Shift+arrows select, Ctrl/Cmd+A/Z/Y select/undo/redo. Esc cancels composition, then closes."
             );
             self.text.focus(window.has_focus());
             window.set_ime_allowed(self.text.input.focused);
@@ -430,6 +431,7 @@ impl ApplicationHandler for App {
         self.renderer = None;
         self.text.reset();
         self.cursor = None;
+        self.drag_tick = None;
         self.hovered = false;
         self.demo_image = None;
         self.window = None;
@@ -491,6 +493,7 @@ impl ApplicationHandler for App {
             },
             WindowEvent::Focused(focused) => {
                 self.text.focus(focused);
+                self.drag_tick = None;
                 window.set_ime_allowed(focused);
                 window.request_redraw();
             }
@@ -505,7 +508,7 @@ impl ApplicationHandler for App {
                 {
                     if let Err(error) = self
                         .text
-                        .click(point, self.text.input.modifiers.shift_key())
+                        .begin_drag(point, self.text.input.modifiers.shift_key())
                     {
                         eprintln!("Text hit test rejected: {error}");
                     }
@@ -515,7 +518,35 @@ impl ApplicationHandler for App {
                     self.text.focus(false);
                     window.set_ime_allowed(false);
                 }
+                self.drag_tick = None;
                 window.request_redraw();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.text.end_drag();
+                self.drag_tick = None;
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.text.dragging()
+                    || self
+                        .cursor
+                        .is_some_and(|point| text_render::FIELD.contains(point))
+                {
+                    match self.text.wheel(
+                        delta,
+                        ScaleFactor::new(window.scale_factor()).expect("positive window DPI"),
+                    ) {
+                        Ok(true) => window.request_redraw(),
+                        Ok(false) => {}
+                        Err(error) => {
+                            eprintln!("Text scrolling rejected: {error}");
+                            self.text.end_drag();
+                        }
+                    }
+                }
             }
             WindowEvent::Resized(size) => {
                 if self.smoke && self.resized && size == PhysicalSize::new(640, 360) {
@@ -532,13 +563,26 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
             }
-            WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.cursor = None;
+                self.text.end_drag();
+                self.drag_tick = None;
+                window.request_redraw();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let point = Point::new(position.x, position.y).to_logical(
                     ScaleFactor::new(window.scale_factor()).expect("positive window DPI"),
                 );
                 let hovered = BOUNDS.contains(point);
                 self.cursor = Some(point);
+                match self.text.drag_to(point) {
+                    Ok(true) => window.request_redraw(),
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("Text drag rejected: {error}");
+                        self.text.end_drag();
+                    }
+                }
                 if hovered != self.hovered {
                     self.hovered = hovered;
                     window.request_redraw();
@@ -546,10 +590,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
+                self.text.end_drag();
+                self.drag_tick = None;
                 self.hovered = false;
                 window.request_redraw();
             }
             WindowEvent::Occluded(false) => window.request_redraw(),
+            WindowEvent::Occluded(true) => {
+                self.text.end_drag();
+                self.drag_tick = None;
+            }
             WindowEvent::RedrawRequested => {
                 window.pre_present_notify();
                 if let Err(e) = self.draw(events) {
@@ -572,7 +622,37 @@ impl ApplicationHandler for App {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
+        } else if self.text.autoscroll_active() {
+            let now = Instant::now();
+            let previous = *self.drag_tick.get_or_insert(now);
+            if now.duration_since(previous) >= Duration::from_millis(16) {
+                self.drag_tick = Some(now);
+                match self
+                    .text
+                    .drag_scroll(now.duration_since(previous).as_secs_f64())
+                {
+                    Ok(true) => {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("Text autoscroll rejected: {error}");
+                        self.text.end_drag();
+                    }
+                }
+            }
+            if self.text.autoscroll_active() {
+                events.set_control_flow(ControlFlow::WaitUntil(
+                    self.drag_tick.unwrap() + Duration::from_millis(16),
+                ));
+            } else {
+                self.drag_tick = None;
+                events.set_control_flow(ControlFlow::Wait);
+            }
         } else {
+            self.drag_tick = None;
             events.set_control_flow(ControlFlow::Wait);
         }
     }
@@ -620,6 +700,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frames: 0,
         hovered: false,
         cursor: None,
+        drag_tick: None,
         resized: false,
         resize_observed: false,
         zero_checked: false,

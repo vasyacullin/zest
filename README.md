@@ -42,16 +42,27 @@ at 30.0.1; the high-level `wgpu` crate is not used.
 
 The demo renders overlapping quads, a checker texture and text with rectangular clips and changes the
 left quad's color on hover. Resize and DPI events update surface/geometry. Normal
-operation uses an event-driven `Wait` loop, without continuous redraw requests.
+operation uses an event-driven `Wait` loop. A timer runs only while an active
+text drag can scroll beyond a viewport edge; other idle states request no frames.
 Click the text field to edit, or outside it to release text focus. Use Shift with
 Left/Right for selection, Home/End for document start/end, Enter for a newline,
 Backspace/Delete for grapheme deletion, Ctrl/Cmd+A to select all, Ctrl/Cmd+Z to
 undo, and Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Arrows follow logical string
 order; visual bidi arrows and Up/Down navigation are still pending. Click places
-the caret using layout hit testing; Shift+click extends selection. The viewport
-follows the caret horizontally and vertically. The caret is steady so idle
+the caret using layout hit testing; Shift+click extends selection. Hold the left
+button and drag to extend from a fixed anchor, including across graphemes and
+wrapped/RTL runs. Dragging beyond the text viewport scrolls toward that edge
+until release or the document boundary. Releasing the button, leaving the window,
+losing focus, a DPI/lifecycle change or starting composition ends the drag.
+The wheel scrolls the field under the pointer without moving the selection or
+taking text focus. Vertical-only Shift+wheel scrolls horizontally. Line deltas
+use 36 logical pixels; touchpad pixel deltas are converted from physical pixels
+using window DPI. Offsets are clamped to content extents. Wheel scrolling during
+a drag extends its head at the stationary pointer while retaining its anchor.
+Manual scroll position persists across redraws; subsequent typing, navigation or
+composition changes reveal the caret again. The caret is steady so idle
 rendering stays asleep. Escape cancels an active composition; otherwise it exits.
-Drag selection, wheel scrolling and clipboard actions are not implemented yet.
+Clipboard actions are not implemented yet.
 Close the window or press Esc to exit. Linux needs a Vulkan driver/loader and
 X11 or Wayland; CI installs the native development libraries listed in its
 workflow. Windows needs a working DX12 or Vulkan driver.
@@ -117,8 +128,11 @@ They cover DPI 1/1.25/1.5, clipping and texture retirement. This verifies the
 CPU-to-GPU path; it does not replace independent reference shaping goldens.
 Editor smoke replays the same binding used for real keyboard/IME events, checks
 selection/caret/preedit pixels, verifies that selection changes do not upload
-text again, and exercises IME clear/commit/undo, focus cancellation, caret
-scrolling, candidate-area bounds and texture retirement. Native IME candidate
+text again, and exercises IME clear/commit/undo, focus cancellation, caret/drag
+scrolling, wheel normalization at fractional DPI, clipped drag highlight pixels,
+candidate-area bounds and texture retirement. Pointer tests use controlled elapsed
+time for stationary-edge autoscroll, limit its step after a stall, and verify it
+stops at document boundaries or capture cancellation. Native IME candidate
 windows and actual keyboard layouts still require manual platform testing;
 event replay does not establish their behavior.
 
@@ -277,8 +291,8 @@ both stacks and their combined payload size.
 
 This initial `String` model scans grapheme boundaries and shifts text during
 edits. It is intended for short UI fields; it has no large-document performance
-claim. Clipboard support is not implemented yet. Winit routing and caret-follow
-scrolling currently live in the demo rather than a public platform/widget API.
+claim. Clipboard support is not implemented yet. Winit routing, pointer selection
+and scrolling currently live in the demo rather than a public platform/widget API.
 
 The demo routes [winit IME events](https://docs.rs/winit/0.30.13/winit/event/enum.Ime.html),
 enables IME only for text focus, and updates the candidate area from the visible
@@ -344,6 +358,10 @@ The demo projects the editing model's display selection into these snapshots,
 paints selection behind text and preedit underlines/caret above it, and clips
 everything to the field viewport. Selection-only changes reuse the same bitmap
 and GPU image.
+`Paragraph::content_size()` includes trailing whitespace, bitmap ink and the
+line-end carets in the positive scroll extents from the paragraph origin, allowing
+the viewport to reach whitespace and a final empty line. Negative ink overhangs
+remain available through the bitmap's origin/dimensions.
 
 Each call accepts at most 64 KiB of text. Registered input font bytes total at
 most 16 MiB. Output is limited to 4096 pixels per dimension and 4 Mi pixels;

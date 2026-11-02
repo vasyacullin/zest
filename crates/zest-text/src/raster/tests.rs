@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn scrolling_extents_include_trailing_whitespace_and_final_empty_line_caret() {
+    let mut raster = rasterizer();
+    for sample in [
+        "",
+        "one\n",
+        "one             ",
+        "                    ",
+        "العربية",
+    ] {
+        let paragraph = raster
+            .paragraph(sample, FAMILIES, RasterOptions::default())
+            .unwrap();
+        let caret = paragraph.caret(sample.len()).unwrap();
+        let (width, height) = paragraph.content_size();
+        assert!(width >= caret.x + caret.width);
+        assert!(height >= caret.y + caret.height);
+        assert!(width >= f64::from(paragraph.bitmap().metrics.width));
+        let start = paragraph.caret(0).unwrap();
+        assert!(
+            width >= start.x + start.width,
+            "{sample:?}: extent {width}, start {start:?}"
+        );
+    }
+}
+
+#[test]
 fn snapshot_geometry_uses_logical_coordinates_for_wrapped_and_rtl_text() {
     let mut raster = rasterizer();
     let sample = "Привет office\nالعربية e\u{301}";

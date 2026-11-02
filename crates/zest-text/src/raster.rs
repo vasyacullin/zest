@@ -146,6 +146,45 @@ impl Paragraph {
     pub fn into_bitmap(self) -> RasterizedText {
         self.bitmap
     }
+    /// Positive scrolling extents from the paragraph origin, including trailing
+    /// whitespace, bitmap ink and line-end carets. Negative ink overhangs remain
+    /// available separately through bitmap origin/dimensions.
+    pub fn content_size(&self) -> (f64, f64) {
+        let scale = f64::from(self.bitmap.scale);
+        let caret = self
+            .caret(self.text.len())
+            .expect("paragraph end is a UTF-8 boundary");
+        let right = (f64::from(self.bitmap.origin_x) + f64::from(self.bitmap.width)) / scale;
+        let bottom = (f64::from(self.bitmap.origin_y) + f64::from(self.bitmap.height)) / scale;
+        // Start-aligned RTL lines can place their logical start at the right
+        // wrapping edge. Include a caret there even when the final caret lies
+        // at the left edge or on an empty following line.
+        let line_right = self
+            .layout
+            .lines()
+            .map(|line| {
+                let metrics = line.metrics();
+                let range = line.text_range();
+                let leading =
+                    Cursor::from_byte_index(&self.layout, range.start, Affinity::Downstream)
+                        .geometry(&self.layout, self.bitmap.scale);
+                let trailing = Cursor::from_byte_index(&self.layout, range.end, Affinity::Upstream)
+                    .geometry(&self.layout, self.bitmap.scale);
+                (f64::from(metrics.offset + metrics.advance) / scale + 1.0)
+                    .max(leading.x1 / scale)
+                    .max(trailing.x1 / scale)
+            })
+            .fold(0.0_f64, f64::max);
+        (
+            (f64::from(self.layout.full_width()) / scale)
+                .max(right)
+                .max(line_right)
+                .max(caret.x + caret.width),
+            (f64::from(self.layout.height()) / scale)
+                .max(bottom)
+                .max(caret.y + caret.height),
+        )
+    }
     pub fn caret(&self, offset: usize) -> Result<TextRect, RasterError> {
         self.validate_offset(offset)?;
         let cursor = Cursor::from_byte_index(&self.layout, offset, Affinity::Downstream);
