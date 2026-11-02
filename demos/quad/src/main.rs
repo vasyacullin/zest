@@ -447,7 +447,7 @@ impl ApplicationHandler for App {
                 );
             } else {
                 println!(
-                    "Layout preview: hover/click to select a node; Tab/Shift+Tab changes focus. Resize reflows text; Esc closes. Text/IME editing is available in the default demo."
+                    "Layout preview: click or Enter/Space toggles selection; Tab/Shift+Tab changes focus. Resize reflows text; Esc closes. Text/IME editing is available in the default demo."
                 );
             }
             self.text.focus(self.layout.is_none() && window.has_focus());
@@ -494,7 +494,6 @@ impl ApplicationHandler for App {
                     &event,
                     WindowEvent::CursorMoved { .. }
                         | WindowEvent::MouseInput {
-                            state: ElementState::Pressed,
                             button: MouseButton::Left,
                             ..
                         }
@@ -531,9 +530,10 @@ impl ApplicationHandler for App {
                         events.exit();
                     }
                     if !self.smoke {
-                        changed |= layout.key(
+                        changed |= layout.key_event(
                             &event.logical_key,
                             event.state == ElementState::Pressed,
+                            event.repeat,
                             *is_synthetic,
                         );
                     }
@@ -550,7 +550,9 @@ impl ApplicationHandler for App {
                     return;
                 }
                 WindowEvent::ModifiersChanged(modifiers) => {
-                    layout.modifiers(modifiers.state());
+                    if layout.modifiers(modifiers.state()) {
+                        window.request_redraw();
+                    }
                     return;
                 }
                 WindowEvent::CursorMoved { position, .. } => {
@@ -568,11 +570,11 @@ impl ApplicationHandler for App {
                     return;
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
-                    if !self.smoke
-                        && *state == ElementState::Pressed
-                        && *button == MouseButton::Left
-                    {
-                        changed |= layout.pointer_press();
+                    if !self.smoke && *button == MouseButton::Left {
+                        changed |= match state {
+                            ElementState::Pressed => layout.pointer_press(),
+                            ElementState::Released => layout.pointer_release(),
+                        };
                     }
                     if changed {
                         window.request_redraw();
@@ -718,7 +720,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(layout) = &mut self.layout {
-                    layout.pointer_left();
+                    layout.cancel_pointer();
                 }
                 self.cursor = None;
                 self.text.cancel_pointer();
@@ -754,7 +756,7 @@ impl ApplicationHandler for App {
             WindowEvent::Occluded(false) => window.request_redraw(),
             WindowEvent::Occluded(true) => {
                 if let Some(layout) = &mut self.layout {
-                    layout.pointer_left();
+                    layout.cancel_pointer();
                 }
                 self.text.cancel_pointer();
                 self.drag_tick = None;

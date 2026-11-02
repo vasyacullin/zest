@@ -1,6 +1,7 @@
 //! Persistent UI scene. Updates declare a complete scene or the complete children
 //! of one container. Widget keys are explicit, independent of labels and order.
 pub mod geometry;
+pub mod input;
 pub mod resource;
 
 use bevy_ecs::prelude::{Component, Entity, World};
@@ -43,11 +44,15 @@ impl WidgetState {
     const HOVERED: u8 = 1;
     const FOCUSED: u8 = 2;
     const PAINT_DIRTY: u8 = 4;
+    const PRESSED: u8 = 8;
     pub fn hovered(self) -> bool {
         self.0 & Self::HOVERED != 0
     }
     pub fn focused(self) -> bool {
         self.0 & Self::FOCUSED != 0
+    }
+    pub fn pressed(self) -> bool {
+        self.0 & Self::PRESSED != 0
     }
     pub fn paint_dirty(self) -> bool {
         self.0 & Self::PAINT_DIRTY != 0

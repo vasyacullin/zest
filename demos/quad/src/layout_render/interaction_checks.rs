@@ -43,6 +43,39 @@ pub(super) fn check(
         &image,
         (point.x * 1.25) as u32,
         (point.y * 1.25) as u32,
+        [63, 149, 203, 255],
+    )?;
+    if !demo.pointer_release()
+        || demo.selected.as_ref() != Some(&demo.footer)
+        || demo.pointer_release()
+    {
+        return Err("layout pointer release did not toggle selection exactly once".into());
+    }
+    let image = self::capture(demo, renderer)?;
+    expect_pixel(
+        &image,
+        (point.x * 1.25) as u32,
+        (point.y * 1.25) as u32,
+        [89, 225, 149, 255],
+    )?;
+    for named in [NamedKey::Enter, NamedKey::Space, NamedKey::Space] {
+        let key = Key::Named(named);
+        if !demo.key(&key, true, false)
+            || demo.key_event(&key, true, true, false)
+            || demo.key(&key, false, true)
+            || !demo.key(&key, false, false)
+        {
+            return Err("layout keyboard activation accepted repeats/synthetic release or lost the real pair".into());
+        }
+    }
+    if demo.selected.is_some() {
+        return Err("layout Enter/Space did not toggle pointer selection".into());
+    }
+    let image = self::capture(demo, renderer)?;
+    expect_pixel(
+        &image,
+        (point.x * 1.25) as u32,
+        (point.y * 1.25) as u32,
         [124, 203, 255, 255],
     )?;
     let tab = Key::Named(NamedKey::Tab);
@@ -57,6 +90,26 @@ pub(super) fn check(
         ((title.origin.y + title.size.height * 0.5) * 1.25) as u32,
         [80, 118, 149, 255],
     )?;
+    let enter = Key::Named(NamedKey::Enter);
+    demo.key(&enter, true, false);
+    let image = self::capture(demo, renderer)?;
+    expect_pixel(
+        &image,
+        ((title.origin.x + title.size.width - 2.0) * 1.25) as u32,
+        ((title.origin.y + title.size.height * 0.5) * 1.25) as u32,
+        [108, 170, 211, 255],
+    )?;
+    demo.key(&enter, false, false);
+    let image = self::capture(demo, renderer)?;
+    expect_pixel(
+        &image,
+        ((title.origin.x + title.size.width - 2.0) * 1.25) as u32,
+        ((title.origin.y + title.size.height - 1.0) * 1.25) as u32,
+        [89, 225, 149, 255],
+    )?;
+    // Toggle off so later focus-loss checks keep the preview's original colors.
+    demo.key(&enter, true, false);
+    demo.key(&enter, false, false);
     demo.modifiers(ModifiersState::SHIFT);
     if !demo.key(&tab, true, false) || demo.scene.focused() != Some(&demo.footer) {
         return Err("layout Shift+Tab did not retain keyed focus order".into());
@@ -94,10 +147,10 @@ pub(super) fn check(
                 .collect::<Vec<_>>()
         || demo.scene.stats().archetypes != archetypes
     {
-        return Err("hover/focus changed layout, text images or ECS archetypes".into());
+        return Err("hover/focus/activation changed layout, text images or ECS archetypes".into());
     }
     println!(
-        "GPU layout input checks passed: hover/click/Tab/Shift+Tab/focus-loss pixels, shared snapshot/paragraph/images and stable ECS archetypes"
+        "GPU layout input checks passed: hover/pressed/selection/Enter/Space/Tab/focus-loss pixels, repeat filtering, shared snapshot/paragraph/images and stable ECS archetypes"
     );
     Ok(())
 }

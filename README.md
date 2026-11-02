@@ -135,20 +135,37 @@ those images; width/content/DPI changes rebuild them and retire old textures.
 GPU restoration can reupload the retained CPU paragraph without reshaping.
 The preview clips to the viewport, limits the readable column width, omits text
 when its content width is below one physical pixel and handles empty viewports.
-Hover highlights a label/marker, left-click focuses it and clicking blank space
-clears focus. Tab/Shift+Tab cycles visible interactive nodes in declaration order;
-unsupported modifiers, synthetic keys and key releases do not advance focus.
+Hover highlights a label/marker; pressing the primary mouse button focuses it.
+Releasing over the same node toggles selection (green underline/marker). Moving
+away disarms the press without transferring capture; moving back re-arms it.
+Blank-space presses clear focus. Tab/Shift+Tab cycles visible interactive nodes
+in declaration order. Enter/Space toggles selection on release; repeats and
+synthetic keys cannot activate nodes. Unsupported modifiers cancel a pending press.
 Fully clipped or subpixel-sized targets are skipped. Geometry is refreshed before
-pointer input/Tab, and resize re-hits a stationary pointer. DPI changes discard
+pointer/keyboard input, and resize re-hits a stationary pointer. DPI changes discard
 stale pointer coordinates; focus remains on the keyed node while it is visible.
-Focus loss clears hover/focus/modifiers; keyed reorder retains focus and removal
-clears it. These changes update scene flags and paint without invalidating layout,
-paragraphs or text images. Repeated movement within one target requests no redraw.
-The preview currently demonstrates focus, without widget activation/capture or
-text editing; IME editing remains in the default demo. Esc closes either mode.
+Focus loss clears hover/focus/modifiers and resets pending gestures. Geometry,
+DPI, occlusion and Tab changes cancel a pending gesture without activating it.
+Keyed reorder retains focus/selection; removal clears them. These changes update
+scene flags and paint without invalidating layout, paragraphs or text images.
+Repeated movement within one target requests no redraw.
+Text/IME editing remains in the default demo. Esc closes either mode.
 The raster bitmap budgets still apply. Layout smoke uses controlled input replay
 for state/highlight pixels and ignores live pointer/Tab input for deterministic
-captures; native keyboard/window focus behavior still needs platform testing.
+captures; native keyboard/window focus and outside-window release delivery still
+need platform testing.
+
+`zest::input::ActivationState` provides the window-independent gesture controller
+used by this preview. Keep one per scene/primary pointer, supply eligible hit
+targets or focused nodes, and handle the returned `InputResult::activated` once.
+`WidgetState::pressed()` shares the existing flags component and marks paint dirty
+without changing ECS archetypes. Captures record scene identity and entity
+generation, so a removed/recreated key cannot finish its predecessor's gesture.
+Call `reconcile` after scene/focus changes, `cancel` after geometry/eligibility
+changes, and `reset` when the window loses input ownership. Cancellation retains
+held-input latches until release; reset forgets them. Reset with the owning scene
+before dropping/switching controllers. Capture is logical: the window backend
+must deliver releases outside its bounds; the controller does not grab the cursor.
 
 ## Experimental GPU slice
 

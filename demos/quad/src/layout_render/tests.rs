@@ -46,6 +46,7 @@ fn hover_click_and_blank_space_update_only_scene_interaction_flags() {
     assert!(!demo.pointer_moved(Point::new(f64::NAN, 0.0)));
     assert!(!demo.update_geometry(Size::new(480.0, 450.0), 1.25).unwrap());
     assert!(snapshot.same_snapshot(demo.snapshot.as_ref().unwrap()));
+    assert!(!demo.pointer_release());
     assert!(demo.pointer_moved(Point::new(5.0, 5.0)));
     assert!(demo.pointer_press());
     assert!(demo.scene.focused().is_none() && demo.hovered.is_none());
@@ -98,6 +99,7 @@ fn resize_rehits_a_stationary_pointer_before_click_and_clears_clipped_focus() {
     demo.pointer_moved(point);
     demo.pointer_press();
     assert_eq!(demo.scene.focused(), Some(&footer));
+    demo.pointer_release();
     demo.update_geometry(Size::new(240.0, 450.0), 1.25).unwrap();
     assert_eq!(demo.hovered, Some(body.clone()));
     assert!(!demo.scene.state(&footer).unwrap().hovered());
@@ -151,4 +153,132 @@ fn dpi_changes_drop_stale_pointer_coordinates_while_retaining_visible_keyed_focu
     assert!(demo.pointer.is_none() && demo.hovered.is_none());
     assert_eq!(demo.scene.focused(), Some(&title));
     assert!(!demo.pointer_left());
+}
+
+#[test]
+fn release_toggles_selection_only_after_a_complete_same_target_gesture() {
+    let mut demo = demo();
+    let title = demo.labels[0].id.clone();
+    let footer = demo.footer.clone();
+    demo.pointer_moved(center(&demo, &title));
+    demo.pointer_press();
+    assert!(demo.scene.state(&title).unwrap().pressed());
+    assert!(demo.selected.is_none());
+    assert_eq!(demo.activation.captured(), Some(&title));
+    demo.pointer_left();
+    assert!(!demo.scene.state(&title).unwrap().pressed());
+    assert_eq!(demo.activation.captured(), Some(&title));
+    demo.pointer_moved(center(&demo, &title));
+    assert!(demo.scene.state(&title).unwrap().pressed());
+    assert!(demo.pointer_release());
+    assert_eq!(demo.selected.as_ref(), Some(&title));
+    assert!(!demo.pointer_release());
+    demo.pointer_press();
+    demo.pointer_moved(center(&demo, &footer));
+    demo.pointer_release();
+    assert_eq!(demo.selected.as_ref(), Some(&title));
+    demo.pointer_moved(center(&demo, &title));
+    demo.pointer_press();
+    demo.pointer_release();
+    assert!(demo.selected.is_none());
+    demo.pointer_moved(Point::new(5.0, 5.0));
+    demo.pointer_press();
+    demo.pointer_moved(center(&demo, &title));
+    assert!(!demo.pointer_release());
+    assert!(demo.selected.is_none());
+}
+
+#[test]
+fn resize_dpi_occlusion_and_focus_loss_cancel_held_gestures() {
+    for cancel in 0..4 {
+        let mut demo = demo();
+        let title = demo.labels[0].id.clone();
+        demo.pointer_moved(center(&demo, &title));
+        demo.pointer_press();
+        match cancel {
+            0 => {
+                demo.update_geometry(Size::new(400.0, 450.0), 1.25).unwrap();
+            }
+            1 => {
+                demo.update_geometry(Size::new(480.0, 450.0), 1.5).unwrap();
+            }
+            2 => {
+                demo.cancel_pointer();
+            }
+            _ => {
+                demo.focus_window(false);
+                demo.focus_window(true);
+            }
+        }
+        assert!(!demo.scene.state(&title).unwrap().pressed());
+        demo.pointer_moved(center(&demo, &title));
+        assert!(!demo.pointer_release());
+        assert!(demo.selected.is_none());
+        demo.pointer_press();
+        assert!(demo.pointer_release());
+        assert_eq!(demo.selected.as_ref(), Some(&title));
+    }
+}
+
+#[test]
+fn keyboard_activation_pairs_releases_and_cancels_on_tab_modifiers_and_resize() {
+    let mut demo = demo();
+    tab(&mut demo);
+    let title = demo.labels[0].id.clone();
+    for key in [
+        Key::Named(NamedKey::Enter),
+        Key::Named(NamedKey::Space),
+        Key::Character(" ".into()),
+    ] {
+        assert!(!demo.key(&key, false, false));
+        assert!(demo.key(&key, true, false));
+        assert!(!demo.key_event(&key, true, true, false));
+        assert!(!demo.key(&key, false, true));
+        assert!(demo.selected.is_none());
+        assert!(demo.scene.state(&title).unwrap().pressed());
+        assert!(demo.key(&key, false, false));
+        assert_eq!(demo.selected.as_ref(), Some(&title));
+        demo.key(&key, true, false);
+        demo.key(&key, false, false);
+        assert!(demo.selected.is_none());
+    }
+    let key = Key::Named(NamedKey::Enter);
+    demo.key(&key, true, false);
+    tab(&mut demo);
+    assert!(!demo.scene.state(&title).unwrap().pressed());
+    assert!(!demo.key(&key, false, false));
+    demo.key(&key, true, false);
+    assert!(demo.modifiers(ModifiersState::CONTROL));
+    demo.modifiers(ModifiersState::empty());
+    assert!(!demo.key(&key, true, false));
+    assert!(!demo.key(&key, false, false));
+    demo.key(&key, true, false);
+    demo.update_geometry(Size::new(470.0, 450.0), 1.25).unwrap();
+    assert!(!demo.key(&key, false, false));
+    assert!(demo.selected.is_none());
+}
+
+#[test]
+fn selection_survives_keyed_reorder_and_is_cleared_by_removal() {
+    let mut demo = demo();
+    let title = demo.labels[0].id.clone();
+    tab(&mut demo);
+    let enter = Key::Named(NamedKey::Enter);
+    demo.key(&enter, true, false);
+    demo.key(&enter, false, false);
+    demo.scene
+        .update_children(&demo.root, |ui| {
+            ui.button("footer", "Layout follows text");
+            ui.button("title", demo.labels[0].source);
+        })
+        .unwrap();
+    demo.update_geometry(Size::new(480.0, 450.0), 1.25).unwrap();
+    assert_eq!(demo.selected.as_ref(), Some(&title));
+    demo.scene
+        .update_children(&demo.root, |ui| {
+            ui.button("footer", "Layout follows text");
+        })
+        .unwrap();
+    demo.update_geometry(Size::new(480.0, 450.0), 1.25).unwrap();
+    assert!(demo.selected.is_none());
 }

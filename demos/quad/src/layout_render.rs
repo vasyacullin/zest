@@ -3,6 +3,7 @@ use super::*;
 use zest::{
     Scene, WidgetId,
     geometry::Size,
+    input::{ActivationKey, ActivationState, InputResult},
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, Style, TextContent},
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
@@ -32,6 +33,8 @@ pub(super) struct LayoutDemo {
     snapshot: Option<LayoutSnapshot>,
     pointer: Option<Point<Logical>>,
     hovered: Option<WidgetId>,
+    activation: ActivationState,
+    selected: Option<WidgetId>,
     window_focused: bool,
     modifiers: winit::keyboard::ModifiersState,
     pub tint: [f32; 4],
@@ -77,6 +80,8 @@ impl LayoutDemo {
             snapshot: None,
             pointer: None,
             hovered: None,
+            activation: ActivationState::default(),
+            selected: None,
             window_focused: true,
             modifiers: winit::keyboard::ModifiersState::empty(),
             tint: [1.0; 4],
@@ -209,6 +214,18 @@ impl LayoutDemo {
             .snapshot
             .as_ref()
             .is_none_or(|old| !old.same_snapshot(&snapshot));
+        if changed {
+            self.activation.cancel(&mut self.scene);
+        }
+        changed |= self.activation.reconcile(&mut self.scene);
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|id| self.scene.state(id).is_none())
+        {
+            self.selected = None;
+            changed = true;
+        }
         self.snapshot = Some(snapshot);
         let target = self
             .pointer
@@ -259,6 +276,7 @@ impl LayoutDemo {
         if self.scene.focused() == target.as_ref() {
             return false;
         }
+        self.activation.cancel(&mut self.scene);
         match target {
             Some(id) => self.scene.focus(&id),
             None => {
@@ -272,17 +290,51 @@ impl LayoutDemo {
             return false;
         }
         self.pointer = Some(point);
-        self.set_hovered(self.hit(point))
+        let target = self.hit(point);
+        let changed = self
+            .activation
+            .pointer_move(&mut self.scene, target.as_ref());
+        self.set_hovered(target) || changed
     }
     pub fn pointer_left(&mut self) -> bool {
         self.pointer = None;
-        self.set_hovered(None)
+        let changed = self.activation.pointer_move(&mut self.scene, None);
+        self.set_hovered(None) || changed
+    }
+    pub fn cancel_pointer(&mut self) -> bool {
+        let changed = self.activation.cancel(&mut self.scene);
+        self.pointer_left() || changed
     }
     pub fn pointer_press(&mut self) -> bool {
+        if !self.window_focused || self.activation.pointer_down() {
+            return false;
+        }
+        let target = self.pointer.and_then(|point| self.hit(point));
+        let changed = self.set_focus(target.clone());
+        let result = self
+            .activation
+            .pointer_press(&mut self.scene, target.as_ref());
+        self.apply_input(result) || changed
+    }
+    pub fn pointer_release(&mut self) -> bool {
         if !self.window_focused {
             return false;
         }
-        self.set_focus(self.pointer.and_then(|point| self.hit(point)))
+        let target = self.pointer.and_then(|point| self.hit(point));
+        let result = self
+            .activation
+            .pointer_release(&mut self.scene, target.as_ref());
+        self.apply_input(result)
+    }
+    fn apply_input(&mut self, result: InputResult) -> bool {
+        if let Some(action) = result.activated {
+            self.selected = if self.selected.as_ref() == Some(&action.widget) {
+                None
+            } else {
+                Some(action.widget)
+            };
+        }
+        result.changed
     }
     pub fn focus_window(&mut self, focused: bool) -> bool {
         self.window_focused = focused;
@@ -290,23 +342,63 @@ impl LayoutDemo {
             return false;
         }
         self.modifiers = winit::keyboard::ModifiersState::empty();
-        let changed = self.pointer_left();
+        let changed = self.activation.reset(&mut self.scene) | self.pointer_left();
         self.set_focus(None) || changed
     }
-    pub fn modifiers(&mut self, modifiers: winit::keyboard::ModifiersState) {
+    pub fn modifiers(&mut self, modifiers: winit::keyboard::ModifiersState) -> bool {
         self.modifiers = if self.window_focused {
             modifiers
         } else {
             winit::keyboard::ModifiersState::empty()
         };
+        self.unsupported_modifiers() && self.activation.cancel(&mut self.scene)
+    }
+    fn unsupported_modifiers(&self) -> bool {
+        self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key()
     }
     pub fn key(&mut self, key: &winit::keyboard::Key, pressed: bool, synthetic: bool) -> bool {
-        if !self.window_focused
-            || !pressed
-            || synthetic
-            || self.modifiers.control_key()
-            || self.modifiers.alt_key()
-            || self.modifiers.super_key()
+        self.key_event(key, pressed, false, synthetic)
+    }
+    pub fn key_event(
+        &mut self,
+        key: &winit::keyboard::Key,
+        pressed: bool,
+        repeat: bool,
+        synthetic: bool,
+    ) -> bool {
+        if !self.window_focused || synthetic {
+            return false;
+        }
+        let activation_key = match key {
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
+                Some(ActivationKey::Enter)
+            }
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space) => {
+                Some(ActivationKey::Space)
+            }
+            winit::keyboard::Key::Character(value) if value == " " => Some(ActivationKey::Space),
+            _ => None,
+        };
+        if let Some(key) = activation_key {
+            let target = self
+                .scene
+                .focused()
+                .filter(|id| {
+                    !self.unsupported_modifiers() && self.interactive(id) && self.visible(id)
+                })
+                .cloned();
+            let result = self.activation.key(
+                &mut self.scene,
+                key,
+                pressed,
+                repeat,
+                false,
+                target.as_ref(),
+            );
+            return self.apply_input(result);
+        }
+        if !pressed
+            || self.unsupported_modifiers()
             || key != &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
         {
             return false;
@@ -314,6 +406,7 @@ impl LayoutDemo {
         let Some(snapshot) = &self.snapshot else {
             return false;
         };
+        let cancelled = self.activation.cancel(&mut self.scene);
         let order: Vec<_> = snapshot
             .boxes()
             .iter()
@@ -321,7 +414,7 @@ impl LayoutDemo {
             .map(|node| node.id.clone())
             .collect();
         if order.is_empty() {
-            return self.set_focus(None);
+            return self.set_focus(None) || cancelled;
         }
         let current = order.iter().position(|id| Some(id) == self.scene.focused());
         let index = if self.modifiers.shift_key() {
@@ -331,7 +424,7 @@ impl LayoutDemo {
         } else {
             current.map_or(0, |index| (index + 1) % order.len())
         };
-        self.set_focus(Some(order[index].clone()))
+        self.set_focus(Some(order[index].clone())) || cancelled
     }
     pub fn paint(&self) -> Result<DisplayList, PaintError> {
         let Some(snapshot) = &self.snapshot else {
@@ -356,7 +449,11 @@ impl LayoutDemo {
                                 let state = self.scene.state(&self.footer).unwrap();
                                 painter.quad(Quad {
                                     bounds,
-                                    color: if state.focused() {
+                                    color: if state.pressed() {
+                                        [0.05, 0.3, 0.6, 1.0]
+                                    } else if self.selected.as_ref() == Some(&self.footer) {
+                                        [0.1, 0.75, 0.3, 1.0]
+                                    } else if state.focused() {
                                         [0.2, 0.6, 1.0, 1.0]
                                     } else if state.hovered() {
                                         [0.4, 0.8, 1.0, 1.0]
@@ -378,10 +475,14 @@ impl LayoutDemo {
                             continue;
                         };
                         let state = self.scene.state(&label.id).unwrap();
-                        if !bounds.is_empty() && (state.focused() || state.hovered()) {
+                        if !bounds.is_empty()
+                            && (state.pressed() || state.focused() || state.hovered())
+                        {
                             painter.quad(Quad {
                                 bounds,
-                                color: if state.focused() {
+                                color: if state.pressed() {
+                                    [0.15, 0.4, 0.65, 1.0]
+                                } else if state.focused() {
                                     [0.08, 0.18, 0.3, 1.0]
                                 } else {
                                     [0.035, 0.06, 0.09, 1.0]
@@ -401,6 +502,18 @@ impl LayoutDemo {
                         );
                         image.tint = self.tint;
                         painter.image(image)?;
+                        if self.selected.as_ref() == Some(&label.id) && !bounds.is_empty() {
+                            let height = bounds.size.height.min(2.0);
+                            painter.quad(Quad {
+                                bounds: Rect::from_xywh(
+                                    bounds.origin.x,
+                                    bounds.origin.y + bounds.size.height - height,
+                                    bounds.size.width,
+                                    height,
+                                ),
+                                color: [0.1, 0.75, 0.3, 1.0],
+                            })?;
+                        }
                     }
                     Ok(())
                 },
