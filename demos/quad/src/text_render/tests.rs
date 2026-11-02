@@ -1,5 +1,229 @@
 use super::*;
+use crate::clipboard::MemoryClipboard;
 use winit::dpi::PhysicalPosition;
+
+#[test]
+fn copying_a_reversed_unicode_selection_is_observational_and_empty_selection_does_not_write() {
+    let mut editor = editor("a e\u{301} 👩🏽‍💻 z");
+    let end = editor.input.buffer.text().len() - 2;
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::new(end, 2)))
+        .unwrap();
+    editor.navigation = Some(
+        editor
+            .paragraph
+            .layout_selection(editor.input.buffer.selection())
+            .unwrap(),
+    );
+    let nav = editor.current_navigation().unwrap().clone();
+    let selection = editor.input.buffer.selection();
+    let history = editor.input.buffer.history_stats();
+    let scroll = (editor.scroll_x, editor.scroll_y);
+    let mut clipboard = MemoryClipboard::default();
+    assert!(
+        !editor
+            .clipboard(ClipboardAction::Copy, &mut clipboard)
+            .unwrap()
+    );
+    assert_eq!(clipboard.text.as_deref(), Some("e\u{301} 👩🏽‍💻"));
+    assert_eq!(editor.input.buffer.selection(), selection);
+    assert_eq!(editor.input.buffer.history_stats(), history);
+    assert_eq!((editor.scroll_x, editor.scroll_y), scroll);
+    assert!(editor.current_navigation().unwrap().same_position(&nav));
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(0)))
+        .unwrap();
+    for action in [ClipboardAction::Copy, ClipboardAction::Cut] {
+        assert!(!editor.clipboard(action, &mut clipboard).unwrap());
+    }
+    assert_eq!(clipboard.writes, 1);
+    assert_eq!(clipboard.reads, 0);
+}
+
+#[test]
+fn cut_commits_only_after_a_successful_write_and_undo_restores_direction() {
+    let mut editor = editor("a Ж👩🏽‍💻 z");
+    let selection = Selection::new(editor.input.buffer.text().len() - 2, 2);
+    editor
+        .edit(|input| input.buffer.set_selection(selection))
+        .unwrap();
+    let before = editor.input.buffer.text().to_owned();
+    let history = editor.input.buffer.history_stats();
+    let guard = editor.paragraph.layout_selection(selection).unwrap();
+    let mut clipboard = MemoryClipboard {
+        text: Some("keep".into()),
+        fail_write: true,
+        ..Default::default()
+    };
+    assert!(
+        editor
+            .clipboard(ClipboardAction::Cut, &mut clipboard)
+            .is_err()
+    );
+    assert_eq!(editor.input.buffer.text(), before);
+    assert_eq!(editor.input.buffer.selection(), selection);
+    assert_eq!(editor.input.buffer.history_stats(), history);
+    assert!(editor.paragraph.selection_caret(&guard).is_ok());
+    assert_eq!(clipboard.text.as_deref(), Some("keep"));
+    clipboard.fail_write = false;
+    assert!(
+        editor
+            .clipboard(ClipboardAction::Cut, &mut clipboard)
+            .unwrap()
+    );
+    assert_eq!(clipboard.text.as_deref(), Some("Ж👩🏽‍💻"));
+    assert_eq!(editor.input.buffer.text(), "a  z");
+    assert_eq!(
+        editor.input.buffer.history_stats().undo_edits,
+        history.undo_edits + 1
+    );
+    editor.edit(|input| input.buffer.undo()).unwrap();
+    assert_eq!(editor.input.buffer.text(), before);
+    assert_eq!(editor.input.buffer.selection(), selection);
+    editor.edit(|input| input.buffer.redo()).unwrap();
+    assert_eq!(editor.input.buffer.text(), "a  z");
+}
+
+#[test]
+fn multiline_paste_normalizes_crlf_as_one_edit_and_restores_replaced_selection() {
+    let mut editor = editor("a OLD z");
+    let selection = Selection::new(5, 2);
+    editor
+        .edit(|input| input.buffer.set_selection(selection))
+        .unwrap();
+    let history = editor.input.buffer.history_stats();
+    let mut clipboard = MemoryClipboard {
+        text: Some("Привет\r\nالعربية\re\u{301}\t👩🏽‍💻".into()),
+        ..Default::default()
+    };
+    editor
+        .clipboard(ClipboardAction::Paste, &mut clipboard)
+        .unwrap();
+    let expected = "a Привет\nالعربية\ne\u{301}\t👩🏽‍💻 z";
+    assert_eq!(editor.input.buffer.text(), expected);
+    assert_eq!(
+        editor.input.buffer.history_stats().undo_edits,
+        history.undo_edits + 1
+    );
+    editor.edit(|input| input.buffer.undo()).unwrap();
+    assert_eq!(editor.input.buffer.text(), "a OLD z");
+    assert_eq!(editor.input.buffer.selection(), selection);
+    editor.edit(|input| input.buffer.redo()).unwrap();
+    assert_eq!(editor.input.buffer.text(), expected);
+    assert_eq!(clipboard.reads, 1);
+    assert_eq!(clipboard.writes, 0);
+}
+
+#[test]
+fn failed_empty_invalid_and_over_budget_pastes_leave_the_document_and_snapshot_intact() {
+    let mut editor = editor("keep");
+    editor.edit(|input| input.buffer.select_all()).unwrap();
+    let history = editor.input.buffer.history_stats();
+    let selection = editor.input.buffer.selection();
+    let guard = editor.paragraph.layout_selection(selection).unwrap();
+    for text in [
+        None,
+        Some("a\0b".to_owned()),
+        Some("x".repeat(MAX_PASTE_BYTES + 1)),
+        Some("\n".repeat(5000)),
+    ] {
+        let mut clipboard = MemoryClipboard {
+            text,
+            ..Default::default()
+        };
+        assert!(
+            editor
+                .clipboard(ClipboardAction::Paste, &mut clipboard)
+                .is_err()
+        );
+        assert_eq!(editor.input.buffer.text(), "keep");
+        assert_eq!(editor.input.buffer.selection(), selection);
+        assert_eq!(editor.input.buffer.history_stats(), history);
+        assert!(editor.paragraph.selection_caret(&guard).is_ok());
+        assert_eq!(clipboard.writes, 0);
+    }
+    let mut clipboard = MemoryClipboard {
+        text: Some("".into()),
+        ..Default::default()
+    };
+    assert!(
+        !editor
+            .clipboard(ClipboardAction::Paste, &mut clipboard)
+            .unwrap()
+    );
+    assert_eq!(editor.input.buffer.selection(), selection);
+    clipboard.fail_read = true;
+    assert!(
+        editor
+            .clipboard(ClipboardAction::Paste, &mut clipboard)
+            .is_err()
+    );
+    assert_eq!(editor.input.buffer.text(), "keep");
+    assert_eq!(editor.input.buffer.history_stats(), history);
+}
+
+#[test]
+fn cut_validates_layout_before_writing_and_rejects_lossy_nul_copy() {
+    let text = format!("{}\n{}", "W".repeat(140), "W".repeat(140));
+    let mut editor = editor(&text);
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::new(140, 141)))
+        .unwrap();
+    let mut clipboard = MemoryClipboard {
+        text: Some("keep".into()),
+        ..Default::default()
+    };
+    assert!(
+        editor
+            .clipboard(ClipboardAction::Cut, &mut clipboard)
+            .is_err()
+    );
+    assert_eq!(editor.input.buffer.text(), text);
+    assert_eq!(clipboard.writes, 0);
+    assert_eq!(clipboard.text.as_deref(), Some("keep"));
+    editor
+        .edit(|input| {
+            input.buffer.select_all()?;
+            input.buffer.insert("a\0b")?;
+            input.buffer.select_all()
+        })
+        .unwrap();
+    for action in [ClipboardAction::Copy, ClipboardAction::Cut] {
+        assert!(editor.clipboard(action, &mut clipboard).is_err());
+        assert_eq!(editor.input.buffer.text(), "a\0b");
+        assert_eq!(clipboard.writes, 0);
+    }
+}
+
+#[test]
+fn clipboard_does_no_io_during_composition_or_without_text_focus() {
+    let mut editor = editor("keep");
+    editor.edit(|input| input.buffer.select_all()).unwrap();
+    editor.ime(&Ime::Enabled).unwrap();
+    editor.ime(&Ime::Preedit("draft".into(), None)).unwrap();
+    let mut clipboard = MemoryClipboard {
+        text: Some("paste".into()),
+        ..Default::default()
+    };
+    for action in [
+        ClipboardAction::Copy,
+        ClipboardAction::Cut,
+        ClipboardAction::Paste,
+    ] {
+        assert!(!editor.clipboard(action, &mut clipboard).unwrap());
+    }
+    assert_eq!(editor.input.buffer.display_text(), "draft");
+    editor.focus(false);
+    for action in [
+        ClipboardAction::Copy,
+        ClipboardAction::Cut,
+        ClipboardAction::Paste,
+    ] {
+        assert!(!editor.clipboard(action, &mut clipboard).unwrap());
+    }
+    assert_eq!(editor.input.buffer.text(), "keep");
+    assert_eq!((clipboard.reads, clipboard.writes), (0, 0));
+}
 
 fn editor(text: &str) -> TextDemo {
     let mut editor = TextDemo::new().unwrap();

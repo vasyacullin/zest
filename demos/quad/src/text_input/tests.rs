@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn clipboard_shortcuts_use_physical_keys_and_require_real_focused_input_without_preedit() {
+    let mut input = TextInput::new("Привет");
+    input.focus(true);
+    input.buffer.select_all().unwrap();
+    input.modifiers = command_modifier();
+    for (key, code, action) in [
+        ("с", KeyCode::KeyC, ClipboardAction::Copy),
+        ("ч", KeyCode::KeyX, ClipboardAction::Cut),
+        ("м", KeyCode::KeyV, ClipboardAction::Paste),
+    ] {
+        let result = input
+            .key_physical(
+                &character(key),
+                PhysicalKey::Code(code),
+                Some(key),
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(result.clipboard, Some(action));
+        assert!(!result.changed);
+        assert_eq!(input.buffer.text(), "Привет");
+        assert!(
+            input
+                .key_physical(
+                    &character(key),
+                    PhysicalKey::Code(code),
+                    Some(key),
+                    false,
+                    false
+                )
+                .unwrap()
+                .clipboard
+                .is_none()
+        );
+        assert!(
+            input
+                .key_physical(
+                    &character(key),
+                    PhysicalKey::Code(code),
+                    Some(key),
+                    true,
+                    true
+                )
+                .unwrap()
+                .clipboard
+                .is_none()
+        );
+    }
+    input.ime(&Ime::Enabled).unwrap();
+    input.ime(&Ime::Preedit("draft".into(), None)).unwrap();
+    assert!(
+        input
+            .key(&character("v"), Some("v"), true, false)
+            .unwrap()
+            .clipboard
+            .is_none()
+    );
+    assert_eq!(input.buffer.display_text(), "draft");
+    input.focus(false);
+    input.modifiers = command_modifier();
+    assert!(
+        input
+            .key(&character("x"), Some("x"), true, false)
+            .unwrap()
+            .clipboard
+            .is_none()
+    );
+    input.focus(true);
+    input.modifiers = ModifiersState::CONTROL | ModifiersState::ALT;
+    let result = input
+        .key_physical(
+            &character("©"),
+            PhysicalKey::Code(KeyCode::KeyC),
+            Some("©"),
+            true,
+            false,
+        )
+        .unwrap();
+    assert!(result.clipboard.is_none());
+    assert_eq!(input.buffer.text(), "©");
+}
+
+#[test]
 fn layout_navigation_requests_preserve_text_and_handle_document_shortcuts() {
     let mut input = TextInput::new("one\ntwo");
     input.focus(true);

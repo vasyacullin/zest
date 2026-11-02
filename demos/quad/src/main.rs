@@ -48,6 +48,7 @@ struct App {
     renderer: Option<Renderer>,
     demo_image: Option<ImageId>,
     text: text_render::TextDemo,
+    clipboard: clipboard::SystemClipboard,
     window: Option<Arc<Window>>,
     backend: Backend,
     smoke: bool,
@@ -413,7 +414,7 @@ impl ApplicationHandler for App {
             self.demo_image = Some(renderer.upload_rgba8(16, 16, &pixels)?);
             println!("Adapter: {}", renderer.adapter_name());
             println!(
-                "Click/drag to edit; arrows move visually, Up/Down preserve the column, Shift selects. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Wheel scrolls. Esc cancels composition, then closes."
+                "Click/drag to edit; arrows move visually, Up/Down preserve the column, Shift selects. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
             );
             self.text.focus(window.has_focus());
             window.set_ime_allowed(self.text.input.focused);
@@ -459,6 +460,13 @@ impl ApplicationHandler for App {
                     is_synthetic,
                 ) {
                     Ok(result) => {
+                        if let Some(action) = result.clipboard {
+                            match self.text.clipboard(action, &mut self.clipboard) {
+                                Ok(true) => window.request_redraw(),
+                                Ok(false) => {}
+                                Err(error) => eprintln!("Clipboard action failed: {error}"),
+                            }
+                        }
                         if result.close {
                             events.exit();
                         }
@@ -694,6 +702,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         renderer: None,
         demo_image: None,
         text: text_render::TextDemo::new()?,
+        clipboard: clipboard::SystemClipboard::default(),
         window: None,
         backend,
         smoke,
@@ -710,6 +719,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         failure: None,
     };
     events.run_app(&mut app)?;
+    drop(app.clipboard);
     // Include destructor diagnostics in the result, and release the GPU owner
     // before the app's window reference. Closing early must not pass smoke.
     drop(app.renderer.take());
@@ -733,6 +743,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+mod clipboard;
 mod image_checks;
 mod text_input;
 mod text_render;

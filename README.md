@@ -66,7 +66,9 @@ a drag extends its head at the stationary pointer while retaining its anchor.
 Manual scroll position persists across redraws; subsequent typing, navigation or
 composition changes reveal the caret again. The caret is steady so idle
 rendering stays asleep. Escape cancels an active composition; otherwise it exits.
-Clipboard actions are not implemented yet.
+Ctrl/Cmd+C, X and V copy, cut and paste plain text while the field is focused
+and no IME composition is active. Empty copy/cut selections and empty pastes do
+nothing. Clipboard failures are reported to stderr and keep the editor open.
 Close the window or press Esc to exit. Linux needs a Vulkan driver/loader and
 X11 or Wayland; CI installs the native development libraries listed in its
 workflow. Windows needs a working DX12 or Vulkan driver.
@@ -299,8 +301,8 @@ both stacks and their combined payload size.
 
 This initial `String` model scans grapheme boundaries and shifts text during
 edits. It is intended for short UI fields; it has no large-document performance
-claim. Clipboard support is not implemented yet. Winit routing, pointer selection
-and scrolling currently live in the demo rather than a public platform/widget API.
+claim. Winit routing, clipboard integration, pointer selection and scrolling
+currently live in the demo rather than a public platform/widget API.
 
 The demo routes [winit IME events](https://docs.rs/winit/0.30.13/winit/event/enum.Ime.html),
 enables IME only for text focus, and updates the candidate area from the visible
@@ -309,11 +311,31 @@ commit as one text edit. Focus loss, IME disablement and Escape cancel pending
 preedit; late commits are ignored until IME is enabled again. Key releases,
 synthetic focus key events, shortcut payloads and control text are not inserted.
 Ctrl+Alt text remains available for AltGr; Option text remains available on macOS.
-Command shortcuts use physical A/Z/Y positions so switching to a Cyrillic layout
-does not disable selection/undo/redo; ordinary typing uses the event's text payload.
+Command shortcuts use physical A/Z/Y/C/X/V positions so switching to a Cyrillic
+layout does not disable selection, history or clipboard commands; ordinary typing
+uses the event's text payload.
 The binding stages the model/history and paragraph layout before accepting an
 edit. If a raster budget is exceeded, it keeps the last accepted document and
 reports the rejection to stderr; an active native composition is reset.
+
+The demo opens [arboard 3.7.0](https://docs.rs/arboard/3.7.0/arboard/struct.Clipboard.html)
+lazily on the first clipboard command and retains it until the window closes,
+including for Linux clipboard ownership. Image clipboard support is disabled;
+the Linux build enables Wayland data control as well as X11 support. Clipboard
+availability depends on the desktop session. The core text model and default
+facade do not depend on an OS clipboard backend.
+
+Copy preserves selection, navigation, history and the text image. Cut stages the
+deletion and paragraph layout, writes the selected text, then accepts the edit;
+a failed write or layout check keeps the document and history intact. Paste is
+one undo step and converts CRLF and bare CR to LF, preserving tabs and Unicode
+sequences. Other control characters are rejected; copying embedded NUL is also
+rejected to avoid truncation on native backends. Incoming plain text and the
+resulting pasted document are limited to 64 KiB of UTF-8, with paragraph raster
+budgets still applying. Clipboard rejections leave the accepted document intact.
+Unit tests and the GPU smoke replay use an in-memory provider, including injected
+read/write failures, and do not access the host clipboard. Native clipboard
+interaction still needs manual verification on each target desktop.
 
 ## Paragraph shaping and rasterization
 

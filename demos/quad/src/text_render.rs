@@ -1,3 +1,6 @@
+use super::clipboard::{
+    ClipboardAction, ClipboardError, MAX_PASTE_BYTES, TextClipboard, paste_text,
+};
 use super::text_input::{KeyResult, TextInput};
 use super::*;
 use winit::{
@@ -23,6 +26,12 @@ const VIEW: Rect<Logical> = Rect::from_xywh(300.0, 280.0, VIEW_WIDTH, VIEW_HEIGH
 struct Drag {
     anchor: LayoutSelection,
     pointer: Point<Logical>,
+}
+
+struct StagedInput {
+    input: TextInput,
+    paragraph: Option<Paragraph>,
+    follow_caret: bool,
 }
 
 pub(super) struct TextDemo {
@@ -90,6 +99,14 @@ impl TextDemo {
         &mut self,
         action: impl FnOnce(&mut TextInput) -> Result<T, zest::text::EditError>,
     ) -> Result<T, Box<dyn std::error::Error>> {
+        let (staged, result) = self.stage_edit(action)?;
+        self.accept_edit(staged);
+        Ok(result)
+    }
+    fn stage_edit<T>(
+        &mut self,
+        action: impl FnOnce(&mut TextInput) -> Result<T, zest::text::EditError>,
+    ) -> Result<(StagedInput, T), Box<dyn std::error::Error>> {
         let mut next = self.input.clone();
         let result = action(&mut next)?;
         let display = next.buffer.display_text();
@@ -97,21 +114,88 @@ impl TextDemo {
             || self.input.buffer.display_selection() != next.buffer.display_selection()
             || self.input.buffer.preedit_range() != next.buffer.preedit_range()
             || self.paragraph.text() != display;
-        if self.paragraph.text() != display {
-            self.paragraph = self.raster.paragraph(
+        let paragraph = if self.paragraph.text() != display {
+            Some(self.raster.paragraph(
                 &display,
                 FAMILIES,
                 Self::options(self.paragraph.bitmap().scale),
-            )?;
+            )?)
+        } else {
+            None
+        };
+        Ok((
+            StagedInput {
+                input: next,
+                paragraph,
+                follow_caret,
+            },
+            result,
+        ))
+    }
+    fn accept_edit(&mut self, staged: StagedInput) {
+        if let Some(paragraph) = staged.paragraph {
+            self.paragraph = paragraph;
             self.uploaded = false;
             self.drag = None;
         }
-        self.input = next;
-        if follow_caret {
+        self.input = staged.input;
+        if staged.follow_caret {
             self.navigation = None;
         }
-        self.follow_caret |= follow_caret;
-        Ok(result)
+        self.follow_caret |= staged.follow_caret;
+    }
+    /// Copy is observational. Cut validates the staged layout before writing and
+    /// commits the deletion only after a successful write. Paste is one edit.
+    pub fn clipboard(
+        &mut self,
+        action: ClipboardAction,
+        clipboard: &mut impl TextClipboard,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if !self.input.focused || self.input.buffer.preedit().is_some() {
+            return Ok(false);
+        }
+        match action {
+            ClipboardAction::Copy | ClipboardAction::Cut => {
+                let text = self.input.buffer.selected_text().to_owned();
+                if text.is_empty() {
+                    return Ok(false);
+                }
+                if text.contains('\0') {
+                    return Err(ClipboardError(
+                        "selected text contains NUL and cannot be copied losslessly".into(),
+                    )
+                    .into());
+                }
+                if action == ClipboardAction::Copy {
+                    clipboard.set_text(&text)?;
+                    return Ok(false);
+                }
+                let (staged, changed) = self.stage_edit(|input| input.buffer.insert(""))?;
+                clipboard.set_text(&text)?;
+                self.accept_edit(staged);
+                self.end_drag();
+                Ok(changed)
+            }
+            ClipboardAction::Paste => {
+                let text = paste_text(&clipboard.get_text()?)?;
+                if text.is_empty() {
+                    return Ok(false);
+                }
+                let retained =
+                    self.input.buffer.text().len() - self.input.buffer.selected_text().len();
+                if text.len() > MAX_PASTE_BYTES.saturating_sub(retained) {
+                    return Err(ClipboardError(
+                        "paste would exceed the 64 KiB document limit".into(),
+                    )
+                    .into());
+                }
+                let changed = self.edit(|input| input.buffer.insert(&text))?;
+                if changed {
+                    self.end_drag();
+                }
+                Ok(changed)
+            }
+        }
     }
     pub fn key(
         &mut self,
@@ -889,13 +973,83 @@ pub(super) fn check_editor(renderer: &mut Renderer) -> Result<(), Box<dyn std::e
             "affinity-only movement rebuilt the bitmap or used the wrong visual line".into(),
         );
     }
+    let mut clipboard = super::clipboard::MemoryClipboard {
+        text: Some("é\r\nالعربية e\u{301}".into()),
+        ..Default::default()
+    };
+    editor.modifiers(command);
+    editor.key(&Key::Character("a".into()), None, true, false)?;
+    let paste = editor.key(&Key::Character("v".into()), None, true, false)?;
+    if paste.clipboard != Some(ClipboardAction::Paste)
+        || !editor.clipboard(paste.clipboard.unwrap(), &mut clipboard)?
+        || editor.input.buffer.text() != "é\nالعربية e\u{301}"
+    {
+        return Err("clipboard shortcut/paste lost Unicode or line endings".into());
+    }
+    editor.prepare(renderer, 1.25)?;
+    capture_editor(&editor, renderer)?;
+    editor.key(&Key::Character("a".into()), None, true, false)?;
+    let image = editor.image;
+    let staged = renderer.upload_stats().staged_bytes;
+    let history = editor.input.buffer.history_stats();
+    let selection = editor.input.buffer.selection();
+    let copy = editor.key(&Key::Character("c".into()), None, true, false)?;
+    if copy.clipboard != Some(ClipboardAction::Copy)
+        || editor.clipboard(copy.clipboard.unwrap(), &mut clipboard)?
+        || clipboard.text.as_deref() != Some("é\nالعربية e\u{301}")
+    {
+        return Err("clipboard copy changed the model or lost selected text".into());
+    }
+    let cut = editor.key(&Key::Character("x".into()), None, true, false)?;
+    if cut.clipboard != Some(ClipboardAction::Cut) {
+        return Err("clipboard cut shortcut was not routed".into());
+    }
+    clipboard.fail_write = true;
+    if editor
+        .clipboard(cut.clipboard.unwrap(), &mut clipboard)
+        .is_ok()
+    {
+        return Err("clipboard write failure was accepted".into());
+    }
+    editor.prepare(renderer, 1.25)?;
+    if editor.input.buffer.text() != "é\nالعربية e\u{301}"
+        || editor.input.buffer.selection() != selection
+        || editor.input.buffer.history_stats() != history
+        || editor.image != image
+        || renderer.upload_stats().staged_bytes != staged
+    {
+        return Err("copy or failed cut changed history, selection or GPU image".into());
+    }
+    clipboard.fail_write = false;
+    if !editor.clipboard(ClipboardAction::Cut, &mut clipboard)?
+        || !editor.input.buffer.text().is_empty()
+    {
+        return Err("successful clipboard cut did not delete the selection".into());
+    }
+    editor.prepare(renderer, 1.25)?;
+    let capture = capture_editor(&editor, renderer)?;
+    let caret = editor.rect(editor.current_caret()?);
+    expect_pixel(
+        &capture,
+        (caret.origin.x * 1.25 - 0.5).ceil() as u32,
+        ((caret.origin.y + caret.size.height * 0.5) * 1.25).floor() as u32,
+        [255; 4],
+    )?;
+    editor.key(&Key::Character("z".into()), None, true, false)?;
+    editor.prepare(renderer, 1.25)?;
+    capture_editor(&editor, renderer)?;
+    if editor.input.buffer.text() != "é\nالعربية e\u{301}"
+        || editor.input.buffer.selection() != selection
+    {
+        return Err("clipboard cut did not undo as one edit".into());
+    }
     renderer.remove_image(editor.image.unwrap())?;
     renderer.wait_idle()?;
     if renderer.image_stats().live != live || renderer.image_stats().retired != 0 {
         return Err("editor image replacement leaked textures".into());
     }
     println!(
-        "GPU editor checks passed: selection/caret/preedit pixels, drag/wheel/visual navigation without texture uploads, vertical goal column, wrap affinity, IME undo, scrolling and texture retirement"
+        "GPU editor checks passed: selection/caret/preedit pixels, drag/wheel/visual navigation without texture uploads, vertical goal column, wrap affinity, IME undo, memory clipboard copy/cut/paste and write failure, scrolling and texture retirement"
     );
     Ok(())
 }

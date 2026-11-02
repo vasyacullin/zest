@@ -1,4 +1,5 @@
 //! Winit-to-model binding kept in the demo until the platform crate exists.
+use super::clipboard::ClipboardAction;
 use winit::{
     event::Ime,
     keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
@@ -11,6 +12,7 @@ pub(super) struct KeyResult {
     pub close: bool,
     pub reset_ime: bool,
     pub navigation: Option<Navigation>,
+    pub clipboard: Option<ClipboardAction>,
 }
 
 #[derive(Clone)]
@@ -83,6 +85,9 @@ impl TextInput {
                 PhysicalKey::Code(KeyCode::KeyA) => Some(Key::Character("a".into())),
                 PhysicalKey::Code(KeyCode::KeyZ) => Some(Key::Character("z".into())),
                 PhysicalKey::Code(KeyCode::KeyY) => Some(Key::Character("y".into())),
+                PhysicalKey::Code(KeyCode::KeyC) => Some(Key::Character("c".into())),
+                PhysicalKey::Code(KeyCode::KeyX) => Some(Key::Character("x".into())),
+                PhysicalKey::Code(KeyCode::KeyV) => Some(Key::Character("v".into())),
                 _ => None,
             }
         } else {
@@ -169,6 +174,15 @@ impl TextInput {
             return Ok(result);
         }
         if shortcut {
+            result.clipboard = match key.as_ref() {
+                Key::Character(c) if c.eq_ignore_ascii_case("c") => Some(ClipboardAction::Copy),
+                Key::Character(c) if c.eq_ignore_ascii_case("x") => Some(ClipboardAction::Cut),
+                Key::Character(c) if c.eq_ignore_ascii_case("v") => Some(ClipboardAction::Paste),
+                _ => None,
+            };
+            if result.clipboard.is_some() {
+                return Ok(result);
+            }
             result.changed = match key.as_ref() {
                 Key::Character(c) if c.eq_ignore_ascii_case("a") => self.buffer.select_all()?,
                 Key::Character(c) if c.eq_ignore_ascii_case("z") => {

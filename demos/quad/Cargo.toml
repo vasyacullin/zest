@@ -10,6 +10,7 @@ publish.workspace = true
 zest = { path = "../..", features = ["gpu", "text-raster"] }
 winit.workspace = true
 log = "0.4"
+arboard = { version = "=3.7.0", default-features = false, features = ["wayland-data-control"] }
 
 [lints]
 workspace = true
