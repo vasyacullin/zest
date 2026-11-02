@@ -15,6 +15,8 @@ use zest::{
     },
 };
 
+mod page_checks;
+
 const FAMILIES: &[&str] = &["Noto Sans", "Noto Sans Arabic"];
 const SAMPLE: &str = "Zest • Привет, мир!\noffice e\u{301} • العربية";
 pub(super) const FIELD: Rect<Logical> = Rect::from_xywh(288.0, 272.0, 344.0, 84.0);
@@ -223,7 +225,7 @@ impl TextDemo {
         &mut self,
         mut result: KeyResult,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
-        if let Some(movement) = result.navigation {
+        if result.navigation.is_some() || result.page.is_some() {
             let current = self
                 .current_navigation()
                 .cloned()
@@ -232,16 +234,31 @@ impl TextDemo {
                     self.paragraph
                         .layout_selection(self.input.buffer.selection())
                 })?;
-            let next = self.paragraph.move_selection(
-                &current,
-                movement,
-                self.input.modifiers.shift_key(),
-            )?;
+            let before = (self.scroll_x, self.scroll_y);
+            let next = if let Some(direction) = result.page {
+                let next = self.paragraph.move_selection_page(
+                    &current,
+                    direction,
+                    VIEW_HEIGHT,
+                    self.input.modifiers.shift_key(),
+                )?;
+                // Keep the caret's viewport-relative height while paging, then
+                // clamp/reveal it at document edges or after manual scrolling.
+                let delta = self.paragraph.selection_caret(&next)?.y
+                    - self.paragraph.selection_caret(&current)?.y;
+                self.scroll_by(0.0, delta);
+                next
+            } else {
+                self.paragraph.move_selection(
+                    &current,
+                    result.navigation.unwrap(),
+                    self.input.modifiers.shift_key(),
+                )?
+            };
             result.changed |= !next.same_position(&current);
             self.input.buffer.set_selection(next.selection())?;
             self.navigation = Some(next);
             self.follow_caret = true;
-            let before = (self.scroll_x, self.scroll_y);
             self.update_view()?;
             result.changed |= before != (self.scroll_x, self.scroll_y);
             self.end_drag();
@@ -1111,6 +1128,7 @@ pub(super) fn check_editor(renderer: &mut Renderer) -> Result<(), Box<dyn std::e
         ((caret.origin.y + caret.size.height * 0.5) * 1.25).floor() as u32,
         [255; 4],
     )?;
+    page_checks::check(&mut editor, renderer)?;
     renderer.remove_image(editor.image.unwrap())?;
     renderer.wait_idle()?;
     if renderer.image_stats().live != live || renderer.image_stats().retired != 0 {

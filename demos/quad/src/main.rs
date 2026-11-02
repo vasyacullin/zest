@@ -414,7 +414,7 @@ impl ApplicationHandler for App {
             self.demo_image = Some(renderer.upload_rgba8(16, 16, &pixels)?);
             println!("Adapter: {}", renderer.adapter_name());
             println!(
-                "Click/drag to edit; arrows move visually, Up/Down preserve the column, Shift selects. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
+                "Click/drag to edit; arrows move visually, Up/Down preserve the column, Shift selects. PageUp/PageDown move by viewport height. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
             );
             let word_modifier = if cfg!(target_os = "macos") {
                 "Option"

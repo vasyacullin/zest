@@ -3,6 +3,228 @@ use crate::raster::{RasterOptions, Rasterizer};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[test]
+fn vertical_arrows_terminate_at_document_edges_through_narrow_wrapped_unicode() {
+    let text = "one e\u{301} 👩🏽‍💻 🇯🇵 العربية two\nthree\n";
+    for width in [15.0, 30.0, 50.0, 95.0] {
+        let paragraph = paragraph(text, width);
+        for offset in text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain([text.len()])
+        {
+            for movement in [Navigation::Up, Navigation::Down] {
+                let mut state = paragraph
+                    .layout_selection(Selection::caret(offset))
+                    .unwrap();
+                let mut stopped = false;
+                for _ in 0..text.len() * 2 + 4 {
+                    let next = paragraph.move_selection(&state, movement, true).unwrap();
+                    assert_eq!(next.selection().anchor, offset);
+                    assert!(crate::boundary(text, next.selection().head));
+                    let old = paragraph.selection_caret(&state).unwrap();
+                    let new = paragraph.selection_caret(&next).unwrap();
+                    assert!(if movement == Navigation::Up {
+                        new.y <= old.y
+                    } else {
+                        new.y >= old.y
+                    });
+                    if next.same_position(&state) {
+                        stopped = true;
+                        break;
+                    }
+                    state = next;
+                }
+                assert!(stopped);
+                assert_eq!(
+                    state.selection().head,
+                    if movement == Navigation::Up {
+                        0
+                    } else {
+                        text.len()
+                    },
+                    "{width}, {offset}, {movement:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn arrow_navigation_uses_the_caret_center_at_overlapping_fractional_line_bounds() {
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        let paragraph = paragraph_at_scale("abcdefghij\nx", 400.0, scale);
+        let top = paragraph.layout_selection(Selection::caret(8)).unwrap();
+        let bottom = paragraph
+            .move_selection(&top, Navigation::Down, false)
+            .unwrap();
+        assert_eq!(bottom.selection(), Selection::caret(12));
+        let back = paragraph
+            .move_selection(&bottom, Navigation::Up, false)
+            .unwrap();
+        assert_eq!(back.selection(), Selection::caret(8));
+        let empty = paragraph_at_scale("one\n", 400.0, scale);
+        let end = empty.layout_selection(Selection::caret(4)).unwrap();
+        let up = empty.move_selection(&end, Navigation::Up, false).unwrap();
+        assert_eq!(up.selection(), Selection::caret(0));
+    }
+}
+
+#[test]
+fn page_motion_preserves_goal_column_across_short_lines_and_arrow_moves() {
+    let text = "abcdefghij\nx\nabcdefghij\nx\nabcdefghij";
+    let paragraph = paragraph(text, 400.0);
+    let start = paragraph.layout_selection(Selection::caret(8)).unwrap();
+    let height = paragraph.selection_caret(&start).unwrap().height;
+    let short = paragraph
+        .move_selection_page(&start, PageDirection::Down, height, false)
+        .unwrap();
+    assert_eq!(short.selection(), Selection::caret(12));
+    let next = paragraph
+        .move_selection(&short, Navigation::Down, false)
+        .unwrap();
+    assert_eq!(next.selection(), Selection::caret(21));
+    let bottom = paragraph
+        .move_selection_page(&next, PageDirection::Down, height * 2.0, true)
+        .unwrap();
+    assert_eq!(bottom.selection(), Selection::new(21, 34));
+    let top = paragraph
+        .move_selection_page(&bottom, PageDirection::Up, height * 4.0, true)
+        .unwrap();
+    assert_eq!(top.selection(), Selection::new(21, 8));
+}
+
+#[test]
+fn page_edges_reach_document_bounds_and_keep_the_vertical_goal() {
+    let paragraph = paragraph("abcdefghij\nx\nabcdefghij", 400.0);
+    let start = paragraph.layout_selection(Selection::caret(8)).unwrap();
+    let bottom = paragraph
+        .move_selection_page(&start, PageDirection::Down, f64::MAX, false)
+        .unwrap();
+    assert_eq!(bottom.selection(), Selection::caret(21));
+    let edge = paragraph
+        .move_selection_page(&bottom, PageDirection::Down, 100.0, true)
+        .unwrap();
+    assert_eq!(edge.selection(), Selection::new(21, paragraph.text().len()));
+    let again = paragraph
+        .move_selection_page(&edge, PageDirection::Down, 100.0, true)
+        .unwrap();
+    assert!(again.same_position(&edge));
+    let top = paragraph
+        .move_selection_page(&edge, PageDirection::Up, f64::MAX, false)
+        .unwrap();
+    assert_eq!(top.selection(), Selection::caret(8));
+    let edge = paragraph
+        .move_selection_page(&top, PageDirection::Up, 100.0, true)
+        .unwrap();
+    assert_eq!(edge.selection(), Selection::new(8, 0));
+    let bottom = paragraph
+        .move_selection_page(&edge, PageDirection::Down, f64::MAX, false)
+        .unwrap();
+    assert_eq!(bottom.selection(), Selection::caret(21));
+}
+
+#[test]
+fn page_heights_are_logical_at_fractional_dpi_and_tiny_pages_advance_one_line() {
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        let paragraph =
+            paragraph_at_scale("abcdefghij\nx\nabcdefghij\nx\nabcdefghij", 400.0, scale);
+        let start = paragraph.layout_selection(Selection::caret(8)).unwrap();
+        let height = paragraph.selection_caret(&start).unwrap().height;
+        let moved = paragraph
+            .move_selection_page(&start, PageDirection::Down, height * 2.0, false)
+            .unwrap();
+        assert_eq!(moved.selection(), Selection::caret(21), "scale {scale}");
+        let tiny = paragraph
+            .move_selection_page(&start, PageDirection::Down, f64::MIN_POSITIVE, false)
+            .unwrap();
+        assert_eq!(tiny.selection(), Selection::caret(12));
+        let back = paragraph
+            .move_selection_page(&tiny, PageDirection::Up, f64::MIN_POSITIVE, false)
+            .unwrap();
+        assert_eq!(back.selection(), Selection::caret(8));
+    }
+}
+
+#[test]
+fn page_motion_handles_wrap_affinity_rtl_graphemes_and_trailing_empty_lines() {
+    for text in [
+        "",
+        "one\n",
+        "one two three four five six seven",
+        "one العربية e\u{301} 👩🏽‍💻 🇯🇵 two\nthree\n",
+    ] {
+        for width in [15.0, 30.0, 95.0] {
+            let paragraph = paragraph(text, width);
+            for offset in text
+                .grapheme_indices(true)
+                .map(|(i, _)| i)
+                .chain([text.len()])
+            {
+                for direction in [PageDirection::Up, PageDirection::Down] {
+                    let mut state = paragraph
+                        .layout_selection(Selection::caret(offset))
+                        .unwrap();
+                    let mut stopped = false;
+                    for _ in 0..text.len() * 2 + 4 {
+                        let next = paragraph
+                            .move_selection_page(&state, direction, 45.0, true)
+                            .unwrap();
+                        assert_eq!(next.selection().anchor, offset);
+                        assert!(crate::boundary(text, next.selection().head));
+                        let old = paragraph.selection_caret(&state).unwrap();
+                        let new = paragraph.selection_caret(&next).unwrap();
+                        assert!(match direction {
+                            PageDirection::Up => new.y <= old.y,
+                            PageDirection::Down => new.y >= old.y,
+                        });
+                        paragraph.selection_geometry(&next).unwrap();
+                        if next.same_position(&state) {
+                            stopped = true;
+                            break;
+                        }
+                        state = next;
+                    }
+                    assert!(stopped, "{text:?}, {offset}, {direction:?}");
+                    assert_eq!(
+                        state.selection().head,
+                        match direction {
+                            PageDirection::Up => 0,
+                            PageDirection::Down => text.len(),
+                        },
+                        "{text:?}, {offset}, {direction:?}, caret {:?}, lines {:?}",
+                        paragraph.selection_caret(&state).unwrap(),
+                        paragraph
+                            .layout
+                            .lines()
+                            .map(|l| (l.metrics().block_min_coord, l.metrics().block_max_coord))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_page_sizes_and_foreign_snapshots_are_rejected_without_changing_selection() {
+    let first = paragraph("one\ntwo", 400.0);
+    let second = paragraph("one\ntwo", 400.0);
+    let state = first.layout_selection(Selection::new(2, 0)).unwrap();
+    for height in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            first.move_selection_page(&state, PageDirection::Down, height, true),
+            Err(RasterError::InvalidOptions)
+        ));
+    }
+    assert!(matches!(
+        second.move_selection_page(&state, PageDirection::Down, 100.0, false),
+        Err(RasterError::ForeignSelection)
+    ));
+    assert_eq!(state.selection(), Selection::new(2, 0));
+    first.selection_caret(&state).unwrap();
+}
+
+#[test]
 fn visual_word_steps_select_whole_words_and_collapse_existing_ranges() {
     let paragraph = paragraph("one two three", 400.0);
     let start = paragraph.layout_selection(Selection::caret(0)).unwrap();
@@ -92,6 +314,10 @@ fn visual_word_steps_terminate_on_graphemes_across_bidi_wraps_and_missing_emoji(
 }
 
 fn paragraph(text: &str, width: f32) -> Paragraph {
+    paragraph_at_scale(text, width, 1.0)
+}
+
+fn paragraph_at_scale(text: &str, width: f32, scale: f32) -> Paragraph {
     let mut raster = Rasterizer::new();
     raster
         .register_font(include_bytes!("../../../../../assets/fonts/NotoSans.ttf").to_vec())
@@ -105,6 +331,7 @@ fn paragraph(text: &str, width: f32) -> Paragraph {
             &["Noto Sans", "Noto Sans Arabic"],
             RasterOptions {
                 width,
+                scale,
                 ..Default::default()
             },
         )

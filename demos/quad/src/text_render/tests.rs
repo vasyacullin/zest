@@ -2,6 +2,100 @@ use super::*;
 use crate::clipboard::MemoryClipboard;
 use winit::dpi::PhysicalPosition;
 
+#[test]
+fn paging_scrolls_with_the_caret_and_preserves_selection_history_and_uploaded_layout() {
+    let mut editor = editor(&"abcdefghij\n".repeat(16));
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(8)))
+        .unwrap();
+    editor.refresh(1.25).unwrap();
+    editor.update_view().unwrap();
+    editor.uploaded = true;
+    let history = editor.input.buffer.history_stats();
+    let snapshot = editor
+        .paragraph
+        .layout_selection(Selection::caret(8))
+        .unwrap();
+    let before = editor.rect(editor.current_caret().unwrap());
+    assert!(
+        editor
+            .key(
+                &Key::Named(NamedKey::PageDown),
+                Some("incidental"),
+                true,
+                false
+            )
+            .unwrap()
+            .changed
+    );
+    let after = editor.rect(editor.current_caret().unwrap());
+    assert!((after.origin.y - before.origin.y).abs() < 1e-4);
+    assert!((editor.scroll_y - VIEW_HEIGHT).abs() <= after.size.height * 0.5 + 1e-4);
+    let anchor = editor.input.buffer.selection().head;
+    editor.modifiers(ModifiersState::SHIFT);
+    editor
+        .key(&Key::Named(NamedKey::PageDown), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection().anchor, anchor);
+    assert!(editor.input.buffer.selection().head > anchor);
+    editor
+        .key(&Key::Named(NamedKey::PageUp), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::caret(anchor));
+    editor.modifiers(ModifiersState::empty());
+    editor
+        .key(&Key::Named(NamedKey::PageUp), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::caret(8));
+    assert_eq!(editor.scroll_y, 0.0);
+    assert!(editor.uploaded);
+    assert_eq!(editor.input.buffer.history_stats(), history);
+    assert!(editor.paragraph.selection_caret(&snapshot).is_ok());
+}
+
+#[test]
+fn page_boundary_noop_reveals_a_manually_hidden_caret_without_changing_history() {
+    let mut editor = editor(&"one\n".repeat(12));
+    let selection = editor.input.buffer.selection();
+    let history = editor.input.buffer.history_stats();
+    editor
+        .wheel(
+            MouseScrollDelta::LineDelta(0.0, 1e6),
+            ScaleFactor::default(),
+        )
+        .unwrap();
+    assert_eq!(editor.scroll_y, 0.0);
+    for (pressed, synthetic) in [(false, false), (true, true)] {
+        assert!(
+            !editor
+                .key(
+                    &Key::Named(NamedKey::PageDown),
+                    Some("incidental"),
+                    pressed,
+                    synthetic
+                )
+                .unwrap()
+                .changed
+        );
+        assert_eq!(editor.scroll_y, 0.0);
+    }
+    assert!(
+        editor
+            .key(&Key::Named(NamedKey::PageDown), None, true, false)
+            .unwrap()
+            .changed
+    );
+    assert!(editor.scroll_y > 0.0);
+    assert_eq!(editor.input.buffer.selection(), selection);
+    assert_eq!(editor.input.buffer.history_stats(), history);
+    assert!(
+        !editor
+            .key(&Key::Named(NamedKey::PageDown), None, true, false)
+            .unwrap()
+            .changed
+    );
+}
+
 fn word_modifier() -> ModifiersState {
     if cfg!(target_os = "macos") {
         ModifiersState::ALT

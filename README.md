@@ -55,7 +55,11 @@ boundaries and Cmd+Up/Down use document boundaries. Ctrl+Left/Right (Option on
 macOS) move by visual word boundaries; Shift extends the selection. Without Shift,
 an existing range first collapses toward the requested visual edge. Ctrl+Backspace
 and Ctrl+Delete (Option on macOS) delete the selection or the previous/next word
-in logical text order, as one undo step. Page navigation is still pending. Click places
+in logical text order, as one undo step. PageUp/PageDown move about one viewport
+height through displayed lines, retain the desired column and scroll with the
+caret. Shift extends selection. At the first/last line, another outward page
+step reaches the document edge. Ctrl/Alt/Cmd combinations with page keys are
+currently consumed without an action. Click places
 the caret using layout hit testing; Shift+click extends selection. Hold the left
 button and drag to extend from a fixed anchor, including across graphemes and
 wrapped/RTL runs. Dragging beyond the text viewport scrolls toward that edge
@@ -146,8 +150,11 @@ windows and actual keyboard layouts still require manual platform testing;
 event replay does not establish their behavior.
 Navigation checks cover vertical goal columns, visual movement in mixed bidi
 text, Shift extension, ligature/grapheme boundaries, empty documents and soft-wrap
-affinity. GPU checks verify the caret moves between visual lines even when its
-byte offset is unchanged and navigation reuses the same bitmap/image.
+affinity. Page tests also cover tiny/extreme viewport heights, fractional DPI,
+short lines, trailing empty lines and progression through narrow wrapped bidi
+text. GPU checks verify the caret moves between visual lines even when its byte
+offset is unchanged, page scrolling retains its viewport-relative height, Shift
+page selection paints correctly and navigation reuses the same bitmap/image.
 
 `Renderer::capture` and `capture_list` provide synchronous packed sRGB RGBA8 readback for tests and
 screenshots. Ordinary rendering never reads back pixels. Smoke fails on renderer
@@ -301,6 +308,21 @@ does not change history, rebuild the paragraph or upload another text image.
 Word commands are blocked during preedit; an accepted deletion that changes no
 text still reveals a manually hidden caret.
 
+`Paragraph::move_selection_page(&selection, PageDirection::Down, height, extend)`
+takes a positive finite viewport height in logical pixels; `PageDirection::Up`
+moves backward. It uses displayed-line metrics, moves at least one line when
+possible and clamps at the first/last line before reaching the document edge on
+another outward step. Page and Up/Down moves share the saved horizontal goal,
+including through short lines and grapheme normalization. Line lookup uses the
+caret's center so small rounding overlaps between fractional-DPI line bounds do
+not select a neighboring row. At wrapped bidi boundaries, it resolves the caret
+affinity onto the target line to keep vertical navigation progressing. Invalid
+heights and foreign snapshot states return
+errors without mutation. Page navigation preserves history and the text image;
+the demo shifts the viewport by the actual caret displacement, clamps it and
+reveals the caret after manual scrolling. IME, focus and synthetic-event guards
+also apply to page keys.
+
 Preedit replaces the selected range only in `display_text()`. Its cursor is
 relative to the preedit string and may use any UTF-8 scalar boundary. Invalid
 document/preedit offsets return an error before mutation. During composition,
@@ -406,8 +428,9 @@ scalar offsets inside a shaped cluster resolve to cluster geometry. Hit testing
 snaps forward to a grapheme boundary accepted by `TextBuffer`. These byte-only
 methods canonicalize bidi/soft-wrap affinity. Interactive editing uses
 `Paragraph::layout_selection` or `selection_at` to create a `LayoutSelection`,
-then `move_selection` with `Navigation` and an extension flag. The state retains
-both endpoint affinities and the horizontal goal for repeated Up/Down moves.
+then `move_selection` with `Navigation`, or `move_selection_page` with a viewport
+height and `PageDirection`, plus an extension flag. The state retains both
+endpoint affinities and the horizontal goal for repeated vertical moves.
 `selection_caret` and `selection_geometry` use that retained visual state;
 `extend_selection` preserves the pointer anchor's affinity. `selection()` gives
 grapheme-aligned model byte offsets. `same_position()` compares visual endpoints,

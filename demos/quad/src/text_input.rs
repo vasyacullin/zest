@@ -4,7 +4,10 @@ use winit::{
     event::Ime,
     keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
 };
-use zest::text::{EditError, Selection, TextBuffer, raster::Navigation};
+use zest::text::{
+    EditError, Selection, TextBuffer,
+    raster::{Navigation, PageDirection},
+};
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(super) struct KeyResult {
@@ -12,6 +15,7 @@ pub(super) struct KeyResult {
     pub close: bool,
     pub reset_ime: bool,
     pub navigation: Option<Navigation>,
+    pub page: Option<PageDirection>,
     pub clipboard: Option<ClipboardAction>,
     /// An accepted deletion also reveals the caret when it changes no text.
     pub reveal_caret: bool,
@@ -126,6 +130,17 @@ impl TextInput {
             self.modifiers.control_key()
         };
         let shortcut = primary && !self.modifiers.alt_key();
+        if !self.modifiers.alt_key() && !self.modifiers.control_key() && !self.modifiers.super_key()
+        {
+            result.page = match key {
+                Key::Named(NamedKey::PageUp) => Some(PageDirection::Up),
+                Key::Named(NamedKey::PageDown) => Some(PageDirection::Down),
+                _ => None,
+            };
+            if result.page.is_some() {
+                return Ok(result);
+            }
+        }
         let word = if cfg!(target_os = "macos") {
             self.modifiers.alt_key() && !self.modifiers.control_key() && !self.modifiers.super_key()
         } else {
@@ -192,6 +207,8 @@ impl TextInput {
             Key::Named(
                 NamedKey::Home
                     | NamedKey::End
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
                     | NamedKey::ArrowLeft
                     | NamedKey::ArrowRight
                     | NamedKey::ArrowUp

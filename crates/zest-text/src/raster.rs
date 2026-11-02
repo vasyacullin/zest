@@ -8,7 +8,7 @@ use parley::{
 };
 use std::{collections::HashSet, fmt, sync::Arc};
 mod navigation;
-pub use navigation::{LayoutSelection, Navigation};
+pub use navigation::{LayoutSelection, Navigation, PageDirection};
 use swash::{
     FontRef,
     scale::{Render, ScaleContext, Source, image::Content},

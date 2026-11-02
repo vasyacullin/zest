@@ -1,5 +1,71 @@
 use super::*;
 
+#[test]
+fn page_keys_request_viewport_navigation_without_inserting_payloads_or_editing_history() {
+    let mut input = TextInput::new("one\ntwo");
+    input.focus(true);
+    for modifiers in [ModifiersState::empty(), ModifiersState::SHIFT] {
+        input.modifiers = modifiers;
+        for (key, direction) in [
+            (NamedKey::PageUp, PageDirection::Up),
+            (NamedKey::PageDown, PageDirection::Down),
+        ] {
+            let result = input
+                .key(&named(key), Some("incidental"), true, false)
+                .unwrap();
+            assert_eq!(result.page, Some(direction));
+            assert!(result.navigation.is_none() && !result.changed);
+        }
+    }
+    for modifiers in [
+        ModifiersState::ALT,
+        ModifiersState::CONTROL,
+        ModifiersState::SUPER,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+    ] {
+        input.modifiers = modifiers;
+        for key in [NamedKey::PageUp, NamedKey::PageDown] {
+            assert_eq!(
+                input
+                    .key(&named(key), Some("incidental"), true, false)
+                    .unwrap(),
+                KeyResult::default()
+            );
+        }
+    }
+    input.modifiers = ModifiersState::empty();
+    for (pressed, synthetic) in [(false, false), (true, true)] {
+        assert_eq!(
+            input
+                .key(
+                    &named(NamedKey::PageDown),
+                    Some("incidental"),
+                    pressed,
+                    synthetic
+                )
+                .unwrap(),
+            KeyResult::default()
+        );
+    }
+    input.ime(&Ime::Enabled).unwrap();
+    input.ime(&Ime::Preedit("draft".into(), None)).unwrap();
+    assert_eq!(
+        input
+            .key(&named(NamedKey::PageDown), None, true, false)
+            .unwrap(),
+        KeyResult::default()
+    );
+    input.focus(false);
+    assert_eq!(
+        input
+            .key(&named(NamedKey::PageUp), None, true, false)
+            .unwrap(),
+        KeyResult::default()
+    );
+    assert_eq!(input.buffer.text(), "one\ntwo");
+    assert_eq!(input.buffer.history_stats().undo_edits, 0);
+}
+
 fn word_modifier() -> ModifiersState {
     if cfg!(target_os = "macos") {
         ModifiersState::ALT
