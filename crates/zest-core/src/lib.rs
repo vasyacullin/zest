@@ -87,6 +87,7 @@ struct Node {
     label: String,
     parent: Option<WidgetId>,
     order: usize,
+    semantics: Option<Box<semantics::SemanticProperties>>,
 }
 struct Declaration {
     id: WidgetId,
@@ -125,6 +126,43 @@ impl Ui {
         self.order = order;
         id
     }
+    /// Set semantic metadata on a node already declared in this builder.
+    /// Unknown/undeclared IDs return false. Metadata is declarative: omitting
+    /// it on a redeclared node restores label-derived defaults. Partial updates
+    /// preserve metadata outside the redeclared descendants, including their root.
+    /// This changes neither identity nor the visible label/paint/layout inputs.
+    ///
+    /// ```
+    /// use zest_core::{Scene, semantics::{SemanticProperties, SemanticQuery}};
+    /// let mut scene = Scene::default();
+    /// scene.update(|ui| {
+    ///     let save = ui.button("save", "💾");
+    ///     assert!(ui.set_semantics(&save, SemanticProperties::default()
+    ///         .named("Save document").described("Writes the open document").test_id("save")));
+    /// })?;
+    /// let snapshot = scene.semantic_snapshot();
+    /// let save = snapshot.find(SemanticQuery::new().test_id("save"))?;
+    /// assert_eq!(save.name, "Save document");
+    /// assert_eq!(scene.label(&save.id), Some("💾"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_semantics(
+        &mut self,
+        id: &WidgetId,
+        properties: semantics::SemanticProperties,
+    ) -> bool {
+        let Some(declaration) = self
+            .declarations
+            .iter_mut()
+            .rev()
+            .find(|declaration| &declaration.id == id)
+        else {
+            return false;
+        };
+        declaration.node.semantics =
+            (properties != semantics::SemanticProperties::default()).then(|| Box::new(properties));
+        true
+    }
     fn declare(&mut self, kind: NodeKind, key: String, label: String) -> WidgetId {
         let mut path = self.path.clone();
         path.push(Segment::Node(kind, key));
@@ -135,6 +173,7 @@ impl Ui {
                 label,
                 parent: self.parent.clone(),
                 order: self.order,
+                semantics: None,
             },
         });
         self.order += 1;
@@ -304,11 +343,17 @@ impl Scene {
         for Declaration { id, node } in ui.declarations {
             if let Some(&entity) = self.entities.get(&id) {
                 if self.world.get::<Node>(entity) != Some(&node) {
+                    let previous = self.world.get::<Node>(entity).unwrap();
+                    let paint_changed = previous.label != node.label
+                        || previous.parent != node.parent
+                        || previous.order != node.order;
                     *self.world.get_mut::<Node>(entity).expect("scene node") = node;
-                    self.world
-                        .get_mut::<WidgetState>(entity)
-                        .expect("scene state")
-                        .set(WidgetState::PAINT_DIRTY, true);
+                    if paint_changed {
+                        self.world
+                            .get_mut::<WidgetState>(entity)
+                            .expect("scene state")
+                            .set(WidgetState::PAINT_DIRTY, true);
+                    }
                     stats.updated += 1;
                 }
             } else {

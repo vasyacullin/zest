@@ -7,6 +7,7 @@ use zest::{
     geometry::Size,
     input::{ActivationKey, ActivationSource, ActivationState, InputResult},
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, RevealPlan, Style, TextContent},
+    semantics::SemanticProperties,
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
 mod clip_checks;
@@ -15,6 +16,7 @@ mod diff_checks;
 mod event_checks;
 mod focus_checks;
 mod interaction_checks;
+mod metadata_checks;
 mod modal_checks;
 mod paint_cache;
 mod paint_cache_checks;
@@ -88,16 +90,35 @@ impl LayoutDemo {
                         18.0,
                     ),
                 ] {
+                    let id = ui.button(key, source);
+                    ui.set_semantics(
+                        &id,
+                        SemanticProperties::default().test_id(format!("layout.{key}")),
+                    );
                     labels.push(Label {
-                        id: ui.button(key, source),
+                        id,
                         source,
                         font_size,
                         content: None,
                         prepared: None,
                     });
                 }
-                footer = Some(ui.button("footer", "Layout follows text"));
+                let id = ui.button("footer", "Layout follows text");
+                ui.set_semantics(
+                    &id,
+                    SemanticProperties::default()
+                        .named("Layout status")
+                        .described("Follows measured text")
+                        .test_id("layout.footer"),
+                );
+                footer = Some(id);
             }));
+            ui.set_semantics(
+                root.as_ref().unwrap(),
+                SemanticProperties::default()
+                    .named("Layout preview")
+                    .test_id("layout.root"),
+            );
         })?;
         let root = root.unwrap();
         let mut activation_handlers = EventHandlers::new(&scene);
@@ -1026,6 +1047,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     paint_cache_checks::check(&mut demo, renderer)?;
     command_checks::check(&mut demo, renderer)?;
     semantic_checks::check(&mut demo, renderer)?;
+    metadata_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;

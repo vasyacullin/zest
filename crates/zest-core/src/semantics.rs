@@ -1,5 +1,5 @@
 //! Read-only semantic observations for inspection and headless UI queries.
-//! Platform accessibility bridges, custom roles/names and actions are separate.
+//! Platform accessibility bridges, custom roles and actions are separate.
 use crate::{Node, NodeKind, Scene, WidgetId};
 use std::{collections::HashMap, fmt, sync::Arc};
 
@@ -7,6 +7,30 @@ use std::{collections::HashMap, fmt, sync::Arc};
 pub enum SemanticRole {
     Group,
     Button,
+}
+/// Optional declaration metadata. None uses the scene label as the semantic
+/// name; Some("") explicitly supplies an empty name. Test IDs do not affect
+/// WidgetId and may repeat across components; scope queries to disambiguate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[must_use]
+pub struct SemanticProperties {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub test_id: Option<String>,
+}
+impl SemanticProperties {
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+    pub fn described(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+    pub fn test_id(mut self, id: impl Into<String>) -> Self {
+        self.test_id = Some(id.into());
+        self
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticState {
@@ -22,8 +46,10 @@ pub struct SemanticState {
 pub struct SemanticNode {
     pub id: WidgetId,
     pub role: SemanticRole,
-    /// Current scene label, matched exactly; containers initially have no name.
+    /// Declared semantic name, or the current scene label when not overridden.
     pub name: String,
+    pub description: Option<String>,
+    pub test_id: Option<String>,
     pub parent: Option<WidgetId>,
     pub children: Vec<WidgetId>,
     pub state: SemanticState,
@@ -36,6 +62,7 @@ pub struct SemanticNode {
 pub struct SemanticQuery<'a> {
     role: Option<SemanticRole>,
     name: Option<&'a str>,
+    test_id: Option<&'a str>,
     id: Option<&'a WidgetId>,
     scope: Option<&'a WidgetId>,
     enabled: Option<bool>,
@@ -51,6 +78,10 @@ impl<'a> SemanticQuery<'a> {
     }
     pub fn named(mut self, name: &'a str) -> Self {
         self.name = Some(name);
+        self
+    }
+    pub fn test_id(mut self, id: &'a str) -> Self {
+        self.test_id = Some(id);
         self
     }
     pub fn id(mut self, id: &'a WidgetId) -> Self {
@@ -125,6 +156,9 @@ impl SemanticSnapshot {
             .filter(|node| {
                 query.role.is_none_or(|role| role == node.role)
                     && query.name.is_none_or(|name| name == node.name)
+                    && query
+                        .test_id
+                        .is_none_or(|id| node.test_id.as_deref() == Some(id))
                     && query.id.is_none_or(|id| id == &node.id)
                     && query
                         .scope
@@ -153,7 +187,8 @@ impl SemanticSnapshot {
 }
 impl Scene {
     /// Copy the current hierarchy, role/name and interaction state in declaration
-    /// preorder. Buttons map to Button and containers to Group. Identity-only
+    /// preorder. Buttons map to Button and containers to Group; optional
+    /// declaration metadata overrides names and adds descriptions/test IDs. Identity-only
     /// scopes are omitted. Disabled/modal-blocked nodes remain in the tree.
     /// Reads do not consume paint flags or alter input/layout state.
     ///
@@ -177,13 +212,19 @@ impl Scene {
             let children = self.children(&id).unwrap().to_vec();
             pending.extend(children.iter().rev().cloned());
             let state = self.state(&id).unwrap();
+            let properties = node.semantics.as_deref();
             index.insert(id.clone(), nodes.len());
             nodes.push(SemanticNode {
                 role: match id.kind() {
                     NodeKind::Button => SemanticRole::Button,
                     NodeKind::Container => SemanticRole::Group,
                 },
-                name: node.label.clone(),
+                name: properties
+                    .and_then(|properties| properties.name.as_ref())
+                    .unwrap_or(&node.label)
+                    .clone(),
+                description: properties.and_then(|properties| properties.description.clone()),
+                test_id: properties.and_then(|properties| properties.test_id.clone()),
                 parent: node.parent.clone(),
                 children,
                 state: SemanticState {
@@ -205,5 +246,7 @@ impl Scene {
     }
 }
 
+#[cfg(test)]
+mod properties_tests;
 #[cfg(test)]
 mod tests;

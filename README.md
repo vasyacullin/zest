@@ -471,23 +471,43 @@ state into an immutable `zest::semantics::SemanticSnapshot`. Clones share owned
 data; old observations remain readable after reconciliation without borrowing the
 scene. `nodes()` follows declaration preorder, `roots()` retains root order, and
 `node(id)` looks up the same stable `WidgetId` used by layout/events. Identity-only
-scopes are omitted. `SemanticNode` exposes parent/children, the scene label as its
-name, and `SemanticRole::{Group, Button}` for containers/buttons. Containers initially
-have empty names. State reports effective enabled, focused, hovered, pressed and
+scopes are omitted. `SemanticNode` exposes parent/children, semantic name, optional
+description/test ID, and `SemanticRole::{Group, Button}` for containers/buttons.
+Names default to scene labels; containers initially have empty names. State reports effective enabled, focused, hovered, pressed and
 input-allowed values; the last includes the current modal boundary. Paint/capture
 bookkeeping is excluded, and reading snapshots never consumes paint work.
 
 `snapshot.find(SemanticQuery::new().role(SemanticRole::Button).named("Save"))`
 requires exactly one match. No match returns `FindError::NotFound`; ambiguity
 returns `FindError::Ambiguous` with all matching IDs in declaration order.
-`find_all(query)` returns every match. Query filters `role`, `named`, `id`, `within`,
+`find_all(query)` returns every match. Query filters `role`, `named`, `test_id`, `id`, `within`,
 `enabled` and `input_allowed` combine with AND. Names match exactly, including case
 and Unicode. `within(id)` includes that node and its descendants; an unknown scope
 matches none. Disabled and modal-blocked nodes stay observable unless filtered out.
 
-These initial snapshots copy the scene and queries scan their nodes. Roles/names
-are derived from the current basic widgets; custom semantic metadata, semantic
-actions and platform accessibility bridges remain future work. IDs describe paths,
+`Ui::set_semantics(&id, SemanticProperties::default().named("Save document")
+.described("Writes the open document").test_id("save"))` supplies declaration metadata
+for an already declared node; unknown/undeclared IDs return false. Semantic names
+can describe icon buttons independently of their painted labels. `None` uses the
+label fallback; an explicit empty name stays empty. Description/test ID are optional
+and preserve explicit empty strings distinctly from absence. Test IDs do not change `WidgetId`
+or event/focus identity. Duplicates are permitted across reusable components;
+combine `test_id` with `within` or other filters, or receive an ambiguity error.
+
+Metadata follows declaration lifetime: redeclaring a node without it restores
+defaults, as does explicitly setting default properties. Partial updates preserve
+metadata on their retained root and untouched branches. Repeated assignment replaces
+the complete properties; failed declarations leave accepted metadata unchanged.
+Metadata-only changes count in `UpdateStats::updated` while leaving paint flags,
+layout, paragraph/image caches and ECS archetypes unchanged. Current snapshots show
+new properties and old snapshots retain their observations. The layout preview uses
+`layout.root`, `layout.title`, `layout.body` and `layout.footer` test IDs, with a
+separate semantic name/description for its footer. GPU smoke checks that changing
+these properties retains the exact paint snapshot and identical pixels.
+
+These initial snapshots copy the scene and queries scan their nodes. Roles are
+derived from the current basic widgets; custom roles, semantic actions and platform
+accessibility bridges remain future work. IDs describe paths,
 so snapshots do not validate entity generations or queued actions. Query fresh
 data and join with current layout/visibility before routing input or binding scene
 commands. Headless and GPU smoke exercise semantic queries, immutable observations,

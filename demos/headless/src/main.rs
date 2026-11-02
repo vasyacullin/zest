@@ -1,7 +1,7 @@
 use zest::Scene;
 use zest::commands::SceneCommands;
 use zest::event::{EventControl, EventHandlers, EventPhase};
-use zest::semantics::{SemanticQuery, SemanticRole};
+use zest::semantics::{SemanticProperties, SemanticQuery, SemanticRole};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scene = Scene::default();
@@ -12,12 +12,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for key in keys {
                     ui.push_id(key, |ui| {
                         let id = ui.button("action", format!("Action {key}"));
+                        ui.set_semantics(
+                            &id,
+                            SemanticProperties::default()
+                                .named(format!("Run action {key}"))
+                                .test_id(format!("action.{key}")),
+                        );
                         if key == "one" {
                             retained = Some(id);
                         }
                     });
                 }
             }));
+            ui.set_semantics(
+                toolbar.as_ref().unwrap(),
+                SemanticProperties::default()
+                    .named("Tools")
+                    .test_id("toolbar"),
+            );
             status = Some(ui.button("status", "Ready"));
         })?;
         println!("Reconciled: {stats:?}; scene: {:?}", scene.stats());
@@ -28,6 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = scene.update_children(&toolbar.unwrap(), |ui| {
         ui.push_id("one", |ui| {
             assert_eq!(ui.button("action", "Updated action"), retained);
+            ui.set_semantics(
+                &retained,
+                SemanticProperties::default()
+                    .named("Run action one")
+                    .test_id("action.one"),
+            );
         });
     })?;
     assert_eq!(scene.focused(), Some(&retained));
@@ -81,7 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let before = scene.semantic_snapshot();
     let query = SemanticQuery::new()
         .role(SemanticRole::Button)
-        .named("Updated action");
+        .test_id("action.one")
+        .named("Run action one");
     assert_eq!(before.find(query)?.id, retained);
     assert!(before.node(&retained).unwrap().state.enabled);
     scene
@@ -101,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(before.node(&retained).unwrap().state.enabled);
     println!("Deferred scene command applied after dispatch: {stats:?}.");
     println!(
-        "Semantic query found the disabled button by role/name; old snapshot remains enabled."
+        "Semantic query found the disabled button by stable test ID/name; old snapshot remains enabled."
     );
     println!("Headless demo: run zest-quad for the experimental window/GPU slice.");
     Ok(())

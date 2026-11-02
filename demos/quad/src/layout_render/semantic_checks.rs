@@ -26,7 +26,8 @@ pub(super) fn check(
     let footer = initial
         .find(
             buttons
-                .named("Layout follows text")
+                .test_id("layout.footer")
+                .named("Layout status")
                 .within(&demo.root)
                 .input_allowed(true),
         )?
