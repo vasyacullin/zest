@@ -30,7 +30,7 @@ in this initial API; automatic call-site keys are planned.
 
 ## Experimental GPU slice
 
-`zest-quad` uses `winit` and direct `wgpu-hal`: Vulkan on Windows/Linux, Metal on
+`zest-quad` uses `winit` and direct `wgpu-hal`: DX12/Vulkan on Windows, Vulkan on Linux, Metal on
 Apple targets. The default `zest` facade stays headless; enable its `gpu` feature
 to use `zest::gpu::{Renderer, Quad}`. HAL, Naga and wgpu-types are pinned together
 at 30.0.1; the high-level `wgpu` crate is not used.
@@ -40,7 +40,25 @@ left quad's color on hover. Resize and DPI events update surface/geometry. Norma
 operation uses an event-driven `Wait` loop, without continuous redraw requests.
 Close the window or press Esc to exit. Linux needs a Vulkan driver/loader and
 X11 or Wayland; CI installs the native development libraries listed in its
-workflow. Windows needs a working Vulkan driver. There is no DX12 fallback yet.
+workflow. Windows needs a working DX12 or Vulkan driver.
+
+`RendererOptions::default()` uses `Backend::Auto`: DX12 then Vulkan on Windows,
+Vulkan on Linux, Metal on Apple. Auto tries the next API if initialization fails;
+`renderer.backend()` reports the chosen API and `renderer.backend_failures()`
+retains earlier failures with their initialization stage. Explicit backend choices
+return an error if unavailable or unsupported on the target, without falling back.
+Selection happens once at creation; it does not recover a device lost during rendering.
+The demo accepts the same choices through `--backend`:
+
+```sh
+cargo run -p zest-quad -- --backend dx12 --smoke
+cargo run -p zest-quad -- --backend vulkan --smoke
+```
+
+In Rust, pass `RendererOptions { backend: Backend::Vulkan, ..Default::default() }`
+to `Renderer::with_options`. DX12 uses HAL's default automatic shader compiler
+selection, including the system FXC fallback when DXC is unavailable
+([HAL compiler options](https://docs.rs/wgpu-types/30.0.1/wgpu_types/enum.Dx12Compiler.html)).
 
 The renderer validates WGSL through Naga and checks adapter limits, sRGB format,
 blending, copy support and presentation capabilities. It owns two frame slots
@@ -91,8 +109,8 @@ invariants and Clippy checks for safety comments. Core, facade and demos retain
 their unsafe-code prohibition. If GPU completion cannot be established during
 shutdown, the owner retains native resources until process exit rather than
 free storage that might still be in use. Terminal HAL failures require recreating
-the renderer. Texture atlases, backend
-fallback and device recovery remain future work; this is an initial HAL slice.
+the renderer. Texture atlases and device recovery remain future work;
+this is an initial HAL slice.
 
 ## Display lists and rectangular clipping
 
@@ -146,7 +164,7 @@ queue/fence, so a draw observes earlier uploads without a whole-device idle wait
 per image.
 
 Texture staging uses one bounded, reusable upload ring (4 MiB by default).
-`Renderer::with_options` accepts `RendererOptions { upload_ring_capacity }` for
+`Renderer::with_options` accepts `RendererOptions { upload_ring_capacity, ..Default::default() }` for
 a different power-of-two capacity, at least 256 bytes and within adapter limits.
 Only successfully submitted ranges consume ring space. Completed fence values
 reclaim ranges; if the ring is full, allocation waits for the oldest submitted
@@ -274,7 +292,8 @@ counts and idle wakeups still need separate measurement. CI has no timing gate.
 CI is configured for formatting, Clippy, tests, the headless demo and benchmark
 smoke checks on Windows, Linux and macOS. Linux additionally runs the quad/pixel
 smoke under Xvfb with Mesa software Vulkan. A separate Linux job tests minimum
-Rust 1.95. Local GPU verification currently covers Windows/Vulkan; Linux/Vulkan
+Rust 1.95. Local GPU verification covers Windows/DX12 and Windows/Vulkan, including
+the default Auto path and identical offscreen demo pixels between the two APIs. Linux/Vulkan
 and macOS/Metal still need runtime verification on those platforms. CI configuration is
 not a report of a successful remote run.
 

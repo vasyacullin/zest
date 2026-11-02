@@ -23,11 +23,8 @@ use wgpu_hal::{
 use wgpu_types as wgt;
 use zest_core::geometry::ScaleFactor;
 
-#[cfg(not(target_vendor = "apple"))]
-type Native = hal::api::Vulkan;
-#[cfg(target_vendor = "apple")]
-type Native = hal::api::Metal;
-pub(crate) type NativeRenderer = Gpu<Native>;
+mod choice;
+pub(crate) use choice::NativeRenderer;
 
 pub(crate) fn shader() -> Result<hal::NagaShader, RenderError> {
     let source = include_str!("quad.wgsl");

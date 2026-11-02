@@ -12,7 +12,7 @@ use winit::{
 };
 use zest::{
     geometry::{Logical, Point, Rect, ScaleFactor},
-    gpu::{Capture, Quad, RenderStatus, Renderer, RendererOptions},
+    gpu::{Backend, Capture, Quad, RenderStatus, Renderer, RendererOptions},
     paint::{DisplayList, Image, ImageId, PaintError},
 };
 
@@ -49,6 +49,7 @@ struct App {
     renderer: Option<Renderer>,
     demo_image: Option<ImageId>,
     window: Option<Arc<Window>>,
+    backend: Backend,
     smoke: bool,
     frames: usize,
     hovered: bool,
@@ -353,18 +354,22 @@ impl ApplicationHandler for App {
                 )?,
             );
             let size = window.inner_size();
-            let mut renderer = if self.smoke {
-                Renderer::with_options(
-                    window.clone(),
-                    size.width,
-                    size.height,
-                    RendererOptions {
-                        upload_ring_capacity: 4096,
-                    },
-                )?
-            } else {
-                Renderer::new(window.clone(), size.width, size.height)?
+            let mut options = RendererOptions {
+                backend: self.backend,
+                ..RendererOptions::default()
             };
+            if self.smoke {
+                options.upload_ring_capacity = 4096;
+            }
+            let mut renderer =
+                Renderer::with_options(window.clone(), size.width, size.height, options)?;
+            println!("Backend: {}", renderer.backend());
+            for failure in renderer.backend_failures() {
+                eprintln!(
+                    "Backend {} initialization failed: {}",
+                    failure.backend, failure.error
+                );
+            }
             let pixels: Vec<_> = (0..16)
                 .flat_map(|y| {
                     (0..16).flat_map(move |x| {
@@ -475,11 +480,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::set_logger(&LOGGER).expect("single demo logger");
     log::set_max_level(log::LevelFilter::Warn);
     let mut smoke = false;
+    let mut backend = Backend::Auto;
     let mut capture_path = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--smoke" => smoke = true,
+            "--backend" => {
+                backend = args
+                    .next()
+                    .ok_or("--backend requires auto, dx12, vulkan or metal")?
+                    .parse()?;
+            }
             "--capture" => {
                 capture_path = Some(std::path::PathBuf::from(
                     args.next().ok_or("--capture requires a PPM path")?,
@@ -488,7 +500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "zest-quad [--smoke] [--capture image.ppm]\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
+                    "zest-quad [--backend auto|dx12|vulkan|metal] [--smoke] [--capture image.ppm]\n--backend: native API (default auto; explicit choices never fall back)\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
                 );
                 return Ok(());
             }
@@ -500,6 +512,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         renderer: None,
         demo_image: None,
         window: None,
+        backend,
         smoke,
         frames: 0,
         hovered: false,

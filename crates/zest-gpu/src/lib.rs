@@ -1,8 +1,8 @@
 //! Experimental direct HAL quad batches with two reusable frame slots.
-//! Vulkan on Windows/Linux; Metal on Apple targets. Adjacent compatible materials
-//! batch without changing painter order. Supports rectangular clips and nearest
+//! DX12/Vulkan on Windows, Vulkan on Linux, Metal on Apple targets. Adjacent
+//! compatible materials batch without changing painter order. Supports clips and nearest
 //! RGBA8 images with bounded upload-ring staging. Widget rendering, text, device
-//! recovery and backend fallback are pending.
+//! recovery are pending. Auto selects an available native API during initialization.
 #![deny(unsafe_code)]
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -13,6 +13,8 @@ use zest_paint::{DisplayList, ImageId, Primitive};
 
 #[allow(unsafe_code)]
 mod backend;
+mod selection;
+pub use selection::{Backend, BackendFailure};
 
 /// The renderer retains this owner until its surface and GPU work are released.
 pub trait SurfaceWindow: HasDisplayHandle + HasWindowHandle + Send + Sync {}
@@ -59,6 +61,9 @@ pub struct ImageStats {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RendererOptions {
+    /// Auto tries DX12 then Vulkan on Windows, Vulkan on Linux, Metal on Apple.
+    /// Explicit choices never fall back to a different API.
+    pub backend: Backend,
     /// Bounded texture staging ring; power of two, at least 256 bytes and within
     /// adapter limits. Larger individual uploads use dedicated staging.
     pub upload_ring_capacity: u64,
@@ -66,6 +71,7 @@ pub struct RendererOptions {
 impl Default for RendererOptions {
     fn default() -> Self {
         Self {
+            backend: Backend::Auto,
             upload_ring_capacity: 4 * 1024 * 1024,
         }
     }
@@ -138,6 +144,14 @@ impl Renderer {
 
     pub fn adapter_name(&self) -> &str {
         self.inner.adapter_name()
+    }
+    /// The selected API, never Auto. It remains fixed for this renderer's life.
+    pub fn backend(&self) -> Backend {
+        self.inner.backend()
+    }
+    /// Earlier failed initialization attempts when Auto succeeded on a fallback.
+    pub fn backend_failures(&self) -> &[BackendFailure] {
+        self.inner.failures()
     }
     pub fn last_frame_stats(&self) -> FrameStats {
         self.inner.last_frame_stats()
