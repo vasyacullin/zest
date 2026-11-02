@@ -12,6 +12,8 @@ mod focus_checks;
 mod interaction_checks;
 mod modal_checks;
 mod scroll_checks;
+mod scrollbar_checks;
+mod scrollbar_input;
 
 const CLIP_HEIGHT: f64 = 96.25;
 
@@ -43,6 +45,7 @@ pub(super) struct LayoutDemo {
     selected: Option<WidgetId>,
     clipped: bool,
     scroll_offset: Point<Logical>,
+    scrollbar_drag: Option<scrollbar_input::Drag>,
     window_focused: bool,
     modifiers: winit::keyboard::ModifiersState,
     pub tint: [f32; 4],
@@ -92,6 +95,7 @@ impl LayoutDemo {
             selected: None,
             clipped: false,
             scroll_offset: Point::new(0.0, 0.0),
+            scrollbar_drag: None,
             window_focused: true,
             modifiers: winit::keyboard::ModifiersState::empty(),
             tint: [1.0; 4],
@@ -162,6 +166,14 @@ impl LayoutDemo {
         viewport: Size<Logical>,
         scale: f32,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.update_geometry_impl(viewport, scale, false)
+    }
+    fn update_geometry_impl(
+        &mut self,
+        viewport: Size<Logical>,
+        scale: f32,
+        keep_drag: bool,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         if self.scale != Some(scale) {
             if self.scale.is_some() {
                 self.pointer = None;
@@ -230,6 +242,9 @@ impl LayoutDemo {
             .is_none_or(|old| !old.same_snapshot(&snapshot));
         if changed {
             self.activation.cancel(&mut self.scene);
+            if !keep_drag {
+                self.clear_scrollbar_drag();
+            }
         }
         if self
             .selected
@@ -244,10 +259,11 @@ impl LayoutDemo {
         Ok(changed)
     }
     fn refresh_input(&mut self) -> bool {
-        let mut changed = self.activation.reconcile(&mut self.scene);
+        let mut changed = self.validate_scrollbar_drag();
+        changed |= self.activation.reconcile(&mut self.scene);
         let target = self
             .pointer
-            .filter(|_| self.window_focused)
+            .filter(|_| self.window_focused && !self.scrollbar_dragging())
             .and_then(|point| self.hit(point));
         changed |= self.set_hovered(target);
         if self
@@ -303,6 +319,12 @@ impl LayoutDemo {
         true
     }
     fn hit(&self, point: Point<Logical>) -> Option<WidgetId> {
+        if self
+            .scrollbar()
+            .is_some_and(|bar| bar.hit_test(point).is_some())
+        {
+            return None;
+        }
         self.snapshot
             .as_ref()?
             .hit_test(point, |id| self.interactive(id) && self.visible(id))
@@ -436,41 +458,45 @@ impl LayoutDemo {
             (metrics.offset.y - y.clamp(-metrics.max_offset.y, metrics.max_offset.y))
                 .clamp(0.0, metrics.max_offset.y),
         );
-        if next == metrics.offset {
-            return Ok(false);
+        let cancelled = self.clear_scrollbar_drag();
+        let changed = self.scroll_to(next, false)?;
+        if cancelled {
+            self.refresh_input();
         }
-        let viewport = snapshot.viewport();
-        let previous = self.scroll_offset;
-        self.scroll_offset = next;
-        if let Err(error) = self.update_geometry(viewport, self.scale.unwrap()) {
-            self.scroll_offset = previous;
-            return Err(error);
-        }
-        Ok(true)
+        Ok(changed || cancelled)
     }
     pub fn pointer_moved(&mut self, point: Point<Logical>) -> bool {
         if !self.window_focused || !point.x.is_finite() || !point.y.is_finite() {
             return false;
         }
+        let was_hovered = self.scrollbar_hovered();
         self.pointer = Some(point);
+        if let Some(changed) = self.drag_scrollbar(point) {
+            return self.refresh_input() || changed;
+        }
         let target = self.hit(point);
         let changed = self
             .activation
             .pointer_move(&mut self.scene, target.as_ref());
-        self.set_hovered(target) || changed
+        self.set_hovered(target) || changed || was_hovered != self.scrollbar_hovered()
     }
     pub fn pointer_left(&mut self) -> bool {
+        let was_hovered = self.scrollbar_hovered();
         self.pointer = None;
         let changed = self.activation.pointer_move(&mut self.scene, None);
-        self.set_hovered(None) || changed
+        self.set_hovered(None) || changed || was_hovered
     }
     pub fn cancel_pointer(&mut self) -> bool {
+        let dragged = self.clear_scrollbar_drag();
         let changed = self.activation.cancel(&mut self.scene);
-        self.pointer_left() || changed
+        self.pointer_left() || changed || dragged
     }
     pub fn pointer_press(&mut self) -> bool {
         if !self.window_focused || self.activation.pointer_down() {
             return false;
+        }
+        if let Some(changed) = self.press_scrollbar() {
+            return changed;
         }
         let target = self.pointer.and_then(|point| self.hit(point));
         let changed = if target.is_some() || !self.modal_active() {
@@ -486,6 +512,11 @@ impl LayoutDemo {
     pub fn pointer_release(&mut self) -> bool {
         if !self.window_focused {
             return false;
+        }
+        if self.clear_scrollbar_drag() {
+            self.activation.pointer_release(&mut self.scene, None);
+            self.refresh_input();
+            return true;
         }
         let target = self.pointer.and_then(|point| self.hit(point));
         let result = self
@@ -509,8 +540,9 @@ impl LayoutDemo {
             return false;
         }
         self.modifiers = winit::keyboard::ModifiersState::empty();
+        let dragged = self.clear_scrollbar_drag();
         let changed = self.activation.reset(&mut self.scene) | self.pointer_left();
-        self.set_focus(None) || changed
+        self.set_focus(None) || changed || dragged
     }
     pub fn modifiers(&mut self, modifiers: winit::keyboard::ModifiersState) -> bool {
         self.modifiers = if self.window_focused {
@@ -518,7 +550,16 @@ impl LayoutDemo {
         } else {
             winit::keyboard::ModifiersState::empty()
         };
-        self.unsupported_modifiers() && self.activation.cancel(&mut self.scene)
+        if self.unsupported_modifiers() {
+            let changed = self.activation.cancel(&mut self.scene);
+            let dragged = self.clear_scrollbar_drag();
+            if dragged {
+                self.refresh_input();
+            }
+            dragged || changed
+        } else {
+            false
+        }
     }
     fn unsupported_modifiers(&self) -> bool {
         self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key()
@@ -536,6 +577,36 @@ impl LayoutDemo {
         if !self.window_focused || synthetic {
             return false;
         }
+        let command = matches!(
+            key,
+            winit::keyboard::Key::Named(
+                winit::keyboard::NamedKey::Tab
+                    | winit::keyboard::NamedKey::Enter
+                    | winit::keyboard::NamedKey::Space
+                    | winit::keyboard::NamedKey::Escape
+                    | winit::keyboard::NamedKey::F2
+                    | winit::keyboard::NamedKey::F3
+                    | winit::keyboard::NamedKey::F4
+            )
+        ) || matches!(key, winit::keyboard::Key::Character(value) if value == " ");
+        let single_press = matches!(
+            key,
+            winit::keyboard::Key::Named(
+                winit::keyboard::NamedKey::Escape
+                    | winit::keyboard::NamedKey::F2
+                    | winit::keyboard::NamedKey::F3
+                    | winit::keyboard::NamedKey::F4
+            )
+        );
+        let cancelled =
+            pressed && command && (!single_press || !repeat) && self.clear_scrollbar_drag();
+        let changed = self.key_action(key, pressed, repeat);
+        if cancelled {
+            self.refresh_input();
+        }
+        changed || cancelled
+    }
+    fn key_action(&mut self, key: &winit::keyboard::Key, pressed: bool, repeat: bool) -> bool {
         if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) {
             return pressed && !repeat && self.close_modal();
         }
@@ -721,6 +792,7 @@ impl LayoutDemo {
                             Ok(())
                         })?;
                     }
+                    self.paint_scrollbar(painter)?;
                     Ok(())
                 },
             )
@@ -803,6 +875,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     clip_checks::check(&mut demo, renderer)?;
     scroll_checks::check(&mut demo, renderer)?;
     focus_checks::check(&mut demo, renderer)?;
+    scrollbar_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -858,5 +931,7 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
 mod focus_tests;
 #[cfg(test)]
 mod scroll_tests;
+#[cfg(test)]
+mod scrollbar_tests;
 #[cfg(test)]
 mod tests;

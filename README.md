@@ -142,7 +142,7 @@ through nonclipping descendants but stops at a clipping child's border; nested
 scrollers calculate independent ranges from unscrolled layout. Resizing/content
 changes recompute those ranges and reclamp requested positions. Empty containers
 have no range. This initial implementation does not expose negative overflow
-before the origin, scrollbars or touch gestures.
+before the origin or touch gestures.
 Wrap text in a container to scroll it; a leaf's own bitmap is not scroll content.
 
 `LayoutBox::layout_bounds` retains absolute unscrolled geometry; `bounds` contains
@@ -162,6 +162,17 @@ Visible targets can return an empty list. Unknown, empty or completely
 unreachable targets return None. Planning does not mutate the scene/snapshot,
 run Taffy or measure text. Use fresh snapshots and check scene eligibility;
 plans carry no entity-generation or input/modal authorization.
+
+`ScrollbarGeometry::new(track, Axis::{Row, Column}, viewport_extent, metrics,
+min_thumb)` provides shared logical track/thumb geometry for custom painting and
+input. Row is horizontal; Column is vertical. It hides empty/invalid tracks and
+zero overflow, clamps finite oversized offsets and bounds the minimum thumb to
+the track. Proportional size and drag mapping avoid overflowing large finite
+metrics. `hit_test` uses half-open edges; `grab_offset` records where the thumb was
+pressed so dragging does not jump. `drag_offset` clamps captured pointers outside
+the track; `page_offset` moves one viewport before/after the thumb. A tiny track
+with no thumb travel retains its offset without division. The helper owns no
+scene widget or capture state; callers cancel drags when geometry/ranges change.
 
 Enable the facade's `layout-text` feature (or `zest-layout/text`) to connect
 shaped text to Flexbox leaves. Create `TextContent::new(raster.shape(text,
@@ -228,6 +239,17 @@ the snapshot. Modal scopes accept wheel input only over eligible content, and a
 disabled/unfocused column rejects it. Scrolling re-hits a stationary pointer and
 cancels gestures; fully hidden focus is cleared. Resizing reclamps the position;
 turning F4 off resets it. Text paragraphs and GPU images stay reusable.
+The clipped column also paints a vertical scrollbar in its right padding. Drag
+the thumb to move content, or click the track to page once (no held-button repeat).
+Thumb/track input takes precedence over scene hits and does not activate or focus
+an underlying node. Capture continues outside the track until release; leaving
+the window still depends on the platform delivering captured events. Resize,
+DPI, reconciliation, blur, occlusion, root disabling, modal entry, scrolling by
+wheel or keyboard commands cancel a drag. An unchanged redraw keeps it active.
+Esc cancels a scrollbar drag before closing a scope/window. The overlay hides
+without overflow, on disabled/tiny columns and while a modal scope is open.
+This preview overlay is a geometry/input demonstration, not a scene scrollbar
+widget or accessibility implementation. It changes quads without uploading text.
 Targets that cannot reveal a one-physical-pixel visible area are skipped. Geometry is refreshed before
 pointer/keyboard/wheel input, and resize re-hits a stationary pointer. DPI changes discard
 stale pointer coordinates; focus remains on the keyed node while it is visible.
@@ -237,7 +259,7 @@ Keyed reorder retains focus/selection; removal clears them. These changes update
 scene flags and paint without invalidating layout, paragraphs or text images.
 Repeated movement within one target requests no redraw.
 Text/IME editing remains in the default demo. Esc closes the layout window when
-no modal scope is open.
+neither a modal scope nor a scrollbar drag is active.
 The raster bitmap budgets still apply. Layout smoke uses controlled input replay
 for state/highlight pixels and ignores live pointer/Tab input for deterministic
 captures; native keyboard/window focus and outside-window release delivery still

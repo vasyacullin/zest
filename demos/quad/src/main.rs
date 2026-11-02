@@ -447,7 +447,7 @@ impl ApplicationHandler for App {
                 );
             } else {
                 println!(
-                    "Layout preview: click or Enter/Space toggles selection; Tab/Shift+Tab reveals and focuses nodes. F2 toggles the body label's enabled state. F3 scopes input to the body; Esc restores the previous focus, then closes. F4 clips the column; wheel scrolls inside it. Resize reflows text. Text/IME editing is available in the default demo."
+                    "Layout preview: click or Enter/Space toggles selection; Tab/Shift+Tab reveals and focuses nodes. F2 toggles the body label's enabled state. F3 scopes input to the body. F4 clips the column; wheel, drag the scrollbar or click its track to scroll. Esc cancels the active drag/scope or closes the window. Resize reflows text. Text/IME editing is available in the default demo."
                 );
             }
             self.text.focus(self.layout.is_none() && window.has_focus());
@@ -529,6 +529,7 @@ impl ApplicationHandler for App {
                         && event.logical_key
                             == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
                         && (!layout.modal_active() || self.smoke)
+                        && !layout.scrollbar_dragging()
                     {
                         events.exit();
                     }
@@ -866,7 +867,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "zest-quad [--layout] [--backend auto|dx12|vulkan|metal] [--smoke] [--capture image.ppm]\n--layout: responsive scene/text layout preview (F2 toggles body; F3 scopes input; F4 clips column; wheel scrolls; Esc unscopes/closes)\n--backend: native API (default auto; explicit choices never fall back)\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
+                    "zest-quad [--layout] [--backend auto|dx12|vulkan|metal] [--smoke] [--capture image.ppm]\n--layout: responsive scene/text layout preview (F2 toggles body; F3 scopes input; F4 clips column; wheel/scrollbar scroll; Esc cancels/unscopes/closes)\n--backend: native API (default auto; explicit choices never fall back)\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
                 );
                 return Ok(());
             }
