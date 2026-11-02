@@ -1,7 +1,10 @@
 //! Read-only semantic observations for inspection and headless UI queries.
 //! Platform accessibility bridges, custom roles and actions are separate.
 use crate::{Node, NodeKind, Scene, WidgetId};
+use bevy_ecs::{entity::Entity, world::WorldId};
 use std::{collections::HashMap, fmt, sync::Arc};
+mod diff;
+pub use diff::SemanticChanges;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticRole {
@@ -119,17 +122,28 @@ impl fmt::Display for FindError {
 }
 impl std::error::Error for FindError {}
 
-#[derive(Debug)]
 struct SnapshotData {
     nodes: Vec<SemanticNode>,
     index: HashMap<WidgetId, usize>,
     roots: Vec<WidgetId>,
     modal_root: Option<WidgetId>,
+    world: WorldId,
+    entities: Vec<Entity>,
+}
+impl fmt::Debug for SnapshotData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SemanticData")
+            .field("nodes", &self.nodes)
+            .field("roots", &self.roots)
+            .field("modal_root", &self.modal_root)
+            .finish_non_exhaustive()
+    }
 }
 /// An immutable semantic observation. Clones share owned data, with no borrow of
 /// the scene and no ECS entities exposed. Old snapshots remain readable after
-/// reconciliation. IDs identify paths, not generations: query a fresh snapshot
-/// before input/actions and validate current eligibility and geometry separately.
+/// reconciliation. Private generation stamps support change comparison; returned
+/// IDs still identify paths, not action handles. Query a fresh snapshot before
+/// input/actions and validate current eligibility and geometry separately.
 /// This is not an OS accessibility tree or an input/activation implementation.
 #[derive(Clone, Debug)]
 pub struct SemanticSnapshot(Arc<SnapshotData>);
@@ -145,6 +159,10 @@ impl SemanticSnapshot {
     }
     pub fn node(&self, id: &WidgetId) -> Option<&SemanticNode> {
         self.0.index.get(id).map(|&index| &self.0.nodes[index])
+    }
+    /// Shared storage identity, rather than equality of observed data.
+    pub fn same_snapshot(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
     /// All matches in declaration preorder. This initial query scans the nodes.
     pub fn find_all(&self, query: SemanticQuery<'_>) -> Vec<&SemanticNode> {
@@ -207,13 +225,16 @@ impl Scene {
         let mut pending: Vec<_> = roots.iter().rev().cloned().collect();
         let mut nodes = Vec::with_capacity(self.entities.len());
         let mut index = HashMap::with_capacity(self.entities.len());
+        let mut entities = Vec::with_capacity(self.entities.len());
         while let Some(id) = pending.pop() {
-            let node = self.world.get::<Node>(self.entities[&id]).unwrap();
+            let entity = self.entities[&id];
+            let node = self.world.get::<Node>(entity).unwrap();
             let children = self.children(&id).unwrap().to_vec();
             pending.extend(children.iter().rev().cloned());
             let state = self.state(&id).unwrap();
             let properties = node.semantics.as_deref();
             index.insert(id.clone(), nodes.len());
+            entities.push(entity);
             nodes.push(SemanticNode {
                 role: match id.kind() {
                     NodeKind::Button => SemanticRole::Button,
@@ -242,6 +263,8 @@ impl Scene {
             index,
             roots,
             modal_root: self.modal_root().cloned(),
+            world: self.world.id(),
+            entities,
         }))
     }
 }

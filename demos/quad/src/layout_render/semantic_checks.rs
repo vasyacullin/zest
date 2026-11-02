@@ -48,11 +48,16 @@ pub(super) fn check(
     demo.pointer_press();
     let pressed = demo.scene.semantic_snapshot();
     let state = pressed.node(&footer).unwrap().state;
+    let changes = pressed.changes_since(&initial);
     if !state.pressed
         || !state.focused
         || !state.hovered
         || !state.input_allowed
         || initial.node(&footer).unwrap().state.pressed
+        || changes.changed != std::slice::from_ref(&footer)
+        || changes.order_changed
+        || changes.roots_changed
+        || changes.modal_changed
     {
         return Err(
             "semantic press/focus/hover observation disagreed with the input controller".into(),
@@ -67,15 +72,8 @@ pub(super) fn check(
         [63, 149, 203, 255],
     )?;
     demo.pointer_release();
-    if demo
-        .scene
-        .semantic_snapshot()
-        .node(&footer)
-        .unwrap()
-        .state
-        .pressed
-        || demo.selected.as_ref() != Some(&footer)
-    {
+    let released = demo.scene.semantic_snapshot();
+    if released.node(&footer).unwrap().state.pressed || demo.selected.as_ref() != Some(&footer) {
         return Err(
             "semantic release retained pressed state or changed the original activation".into(),
         );
@@ -85,17 +83,23 @@ pub(super) fn check(
     let disabled = demo.scene.semantic_snapshot();
     if disabled.find(buttons.enabled(false))?.id != body
         || disabled.node(&body).unwrap().state.input_allowed
+        || disabled.changes_since(&released).changed != std::slice::from_ref(&body)
     {
         return Err("semantic availability filter disagreed with disabled body input".into());
     }
     demo.key(&Key::Named(NamedKey::F2), true, false);
     demo.key(&Key::Named(NamedKey::F3), true, false);
     let modal = demo.scene.semantic_snapshot();
+    let changes = modal.changes_since(&disabled);
     if modal.modal_root() != Some(&body)
         || modal.find(buttons.input_allowed(true))?.id != body
         || modal.find_all(buttons).len() != 3
         || !modal.node(&footer).unwrap().state.enabled
         || modal.node(&footer).unwrap().state.input_allowed
+        || !changes.modal_changed
+        || changes.changed.len() != modal.nodes().len()
+        || changes.order_changed
+        || changes.roots_changed
     {
         return Err(
             "semantic modal observation removed blocked nodes or confused availability with scope"
@@ -128,7 +132,11 @@ pub(super) fn check(
         .unwrap()
         .paragraph
         .selection_caret(&guard)?;
-    if initial.nodes() != demo.scene.semantic_snapshot().nodes()
+    if !demo
+        .scene
+        .semantic_snapshot()
+        .changes_since(&initial)
+        .is_empty()
         || !layout.same_snapshot(demo.snapshot.as_ref().unwrap())
         || renderer.upload_stats().staged_bytes != staged
         || demo.scene.stats().archetypes != archetypes

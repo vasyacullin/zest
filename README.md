@@ -505,10 +505,30 @@ new properties and old snapshots retain their observations. The layout preview u
 separate semantic name/description for its footer. GPU smoke checks that changing
 these properties retains the exact paint snapshot and identical pixels.
 
+`current.changes_since(&previous)` produces `SemanticChanges`. `added`, `changed`
+and `replaced` follow current declaration preorder; `removed` follows the old
+order. Changed nodes include differences in role, metadata, parent/children and
+observed state. A matching path whose entity generation or scene changed appears
+only in `replaced`, even with identical node data. Other lists remain disjoint.
+Private instance stamps support this distinction without exposing ECS handles in
+nodes, query diagnostics or snapshot Debug output.
+
+`order_changed` compares the full node sequence, including additions/removals;
+`roots_changed` compares root IDs/order. `modal_changed` compares the innermost root
+path and instance, including empty scopes. `is_empty()` checks all lists/flags.
+Shared snapshots compare empty immediately; `same_snapshot` checks storage identity.
+Independent observations of unchanged data/instances also compare empty. Other
+comparisons walk both lists using existing indexes. These are endpoint differences:
+transient focus/press changes between observations and unpublished modal stack depth
+are omitted. Geometry and paint bookkeeping remain separate. A recreated widget
+can therefore require a semantic replacement while reusing identical layout/paint.
+Consumers read old/new node data from their snapshots and choose update ordering;
+comparison itself does not publish platform updates or consume scene invalidation.
+
 These initial snapshots copy the scene and queries scan their nodes. Roles are
 derived from the current basic widgets; custom roles, semantic actions and platform
-accessibility bridges remain future work. IDs describe paths,
-so snapshots do not validate entity generations or queued actions. Query fresh
+accessibility bridges remain future work. Query result IDs identify paths and
+require current eligibility checks when used for input or queued actions. Query fresh
 data and join with current layout/visibility before routing input or binding scene
 commands. Headless and GPU smoke exercise semantic queries, immutable observations,
 gesture state and modal/disabled eligibility alongside the existing input path.

@@ -45,6 +45,7 @@ pub(super) fn check(
         return Err("metadata update changed declarations outside the footer".into());
     }
     let current = demo.scene.semantic_snapshot();
+    let changes = current.changes_since(&old);
     if current
         .find(
             SemanticQuery::new()
@@ -59,6 +60,11 @@ pub(super) fn check(
             .name
             != "Layout status"
         || demo.scene.needs_paint()
+        || changes.changed != std::slice::from_ref(&footer.id)
+        || !changes.replaced.is_empty()
+        || changes.order_changed
+        || changes.roots_changed
+        || changes.modal_changed
     {
         return Err(
             "metadata update changed identity/paint or mutated the old semantic snapshot".into(),
@@ -78,7 +84,11 @@ pub(super) fn check(
         .unwrap()
         .paragraph
         .selection_caret(&guard)?;
-    if old.nodes() != demo.scene.semantic_snapshot().nodes()
+    if !demo
+        .scene
+        .semantic_snapshot()
+        .changes_since(&old)
+        .is_empty()
         || !layout.same_snapshot(demo.snapshot.as_ref().unwrap())
         || demo.scene.needs_paint()
         || !Arc::ptr_eq(&list, &demo.cached_paint()?)
@@ -101,10 +111,19 @@ pub(super) fn check(
     );
     Ok(())
 }
-fn redeclare(
+pub(super) fn redeclare(
     demo: &mut LayoutDemo,
     name: &str,
     test_id: &str,
+) -> Result<UpdateStats, zest::ReconcileError> {
+    declare_footer(demo, Some((name, test_id)))
+}
+pub(super) fn without_footer(demo: &mut LayoutDemo) -> Result<UpdateStats, zest::ReconcileError> {
+    declare_footer(demo, None)
+}
+fn declare_footer(
+    demo: &mut LayoutDemo,
+    properties: Option<(&str, &str)>,
 ) -> Result<UpdateStats, zest::ReconcileError> {
     let labels = &demo.labels;
     demo.scene.update_children(&demo.root, |ui| {
@@ -115,13 +134,15 @@ fn redeclare(
                 SemanticProperties::default().test_id(format!("layout.{key}")),
             );
         }
-        let footer = ui.button("footer", "Layout follows text");
-        ui.set_semantics(
-            &footer,
-            SemanticProperties::default()
-                .named(name)
-                .described("Follows measured text")
-                .test_id(test_id),
-        );
+        if let Some((name, test_id)) = properties {
+            let footer = ui.button("footer", "Layout follows text");
+            ui.set_semantics(
+                &footer,
+                SemanticProperties::default()
+                    .named(name)
+                    .described("Follows measured text")
+                    .test_id(test_id),
+            );
+        }
     })
 }

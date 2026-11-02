@@ -116,12 +116,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(stats.applied, 1);
     assert!(!scene.state(&retained).unwrap().enabled());
     let current = scene.semantic_snapshot();
+    let changes = current.changes_since(&before);
+    assert_eq!(changes.changed, std::slice::from_ref(&retained));
+    assert!(changes.added.is_empty() && changes.removed.is_empty() && changes.replaced.is_empty());
+    assert!(!changes.order_changed && !changes.roots_changed && !changes.modal_changed);
     assert_eq!(current.find(query.enabled(false))?.id, retained);
     assert!(before.node(&retained).unwrap().state.enabled);
     println!("Deferred scene command applied after dispatch: {stats:?}.");
     println!(
         "Semantic query found the disabled button by stable test ID/name; old snapshot remains enabled."
     );
+    println!("Semantic diff reports only the changed button, independently of paint bookkeeping.");
     println!("Headless demo: run zest-quad for the experimental window/GPU slice.");
     Ok(())
 }
