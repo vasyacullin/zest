@@ -614,6 +614,29 @@ assert_eq!(list.len(), 2);
 
 Pass the snapshot to `Renderer::render_list` or `capture_list`. Single-quad
 `render`/`capture` calls and the `zest::gpu::Quad` import remain available.
+
+`DisplayListCache<K>` retains one CPU snapshot under an application-owned key.
+`get_or_try_build(key, builder)` returns an `Arc<DisplayList>`; equal keys skip the
+builder and share command buffers. Changed keys publish a new snapshot only on
+success. Errors are returned, rather than substituting old paint; errors/panics
+leave the previous entry available under its previous key. `get(&key)` reads only
+a matching entry, and `clear()` releases cache ownership. Previously returned Arcs
+remain immutable CPU snapshots. Keys need `PartialEq`, with no Clone/Default bound;
+builder errors may use any type.
+
+The caller must include every paint input in the key, or clear the cache when it
+changes. This includes resource identities and device recovery. The cache owns no
+GPU images and does not schedule/acknowledge frames; keeping an old Arc does not
+keep its referenced textures alive. Scene invalidation, layout comparison and GPU
+resource validation remain separate contracts.
+
+The layout window uses this cache with geometry identity, visible interaction
+flags, selection/modal decoration, tint, scrollbar geometry/appearance and text
+image identities/bitmap bounds. Dirty/capture bookkeeping is excluded, so retrying
+or acknowledging a frame can reuse its commands. Clearing/restoring GPU images
+replaces cached image handles while retaining CPU paragraphs. GPU smoke compares
+cached/direct commands and pixels across interaction, clipping and scrolling.
+
 Nonfinite clips are errors; empty/negative clip extents hide their child scope.
 Invalid quad input is rejected even when clipped out. A returned clip-scope error
 rolls back its commands, and a failed list builder exposes no partial snapshot.

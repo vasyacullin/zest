@@ -14,6 +14,8 @@ mod event_checks;
 mod focus_checks;
 mod interaction_checks;
 mod modal_checks;
+mod paint_cache;
+mod paint_cache_checks;
 mod paint_checks;
 mod scroll_chain_checks;
 mod scroll_checks;
@@ -55,6 +57,7 @@ pub(super) struct LayoutDemo {
     scrollbar_drag: Option<scrollbar_input::Drag>,
     window_focused: bool,
     modifiers: winit::keyboard::ModifiersState,
+    paint_cache: zest::paint::DisplayListCache<paint_cache::PaintKey>,
     pub tint: [f32; 4],
 }
 impl LayoutDemo {
@@ -121,11 +124,13 @@ impl LayoutDemo {
             scrollbar_drag: None,
             window_focused: true,
             modifiers: winit::keyboard::ModifiersState::empty(),
+            paint_cache: Default::default(),
             tint: [1.0; 4],
         })
     }
     /// The renderer destroys its images during suspension; CPU paragraphs stay reusable.
     pub fn reset_gpu(&mut self) {
+        self.paint_cache.clear();
         for label in &mut self.labels {
             if let Some(prepared) = &mut label.prepared {
                 prepared.image = None;
@@ -885,6 +890,7 @@ impl LayoutDemo {
         })
     }
     fn remove_images(&mut self, renderer: &mut Renderer) -> Result<(), Box<dyn std::error::Error>> {
+        self.paint_cache.clear();
         for label in &mut self.labels {
             if let Some(image) = label
                 .prepared
@@ -966,6 +972,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     event_checks::check(&mut demo, renderer)?;
     paint_checks::check(&mut demo, renderer)?;
     diff_checks::check(&mut demo, renderer)?;
+    paint_cache_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -1021,6 +1028,8 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
 mod event_tests;
 #[cfg(test)]
 mod focus_tests;
+#[cfg(test)]
+mod paint_cache_tests;
 #[cfg(test)]
 mod paint_tests;
 #[cfg(test)]

@@ -112,11 +112,15 @@ impl App {
         // before either slot has allocated a vertex/upload buffer.
         let clear_only = self.smoke && self.frames < 2;
         let list = if clear_only {
-            DisplayList::default()
-        } else if let Some(layout) = &self.layout {
-            layout.paint()?
+            Arc::new(DisplayList::default())
+        } else if let Some(layout) = &mut self.layout {
+            layout.cached_paint()?
         } else {
-            demo_list(self.hovered, self.demo_image.unwrap(), &self.text)?
+            Arc::new(demo_list(
+                self.hovered,
+                self.demo_image.unwrap(),
+                &self.text,
+            )?)
         };
         let status = renderer.render_list(&list, scale)?;
         match status {

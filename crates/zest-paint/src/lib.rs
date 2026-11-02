@@ -1,5 +1,7 @@
 //! Backend-independent paint snapshots. Quads/images stay in painter order;
 //! nested clips intersect on the CPU, adjusting image UVs with their bounds.
+mod cache;
+pub use cache::DisplayListCache;
 use std::fmt;
 use zest_core::geometry::{Logical, Rect};
 use zest_core::resource::ResourceId;
