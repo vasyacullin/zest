@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-zest = { path = "../..", features = ["gpu", "text-raster"] }
+zest = { path = "../..", features = ["gpu", "layout-text"] }
 winit.workspace = true
 log = "0.4"
 arboard = { version = "=3.7.0", default-features = false, features = ["wayland-data-control"] }

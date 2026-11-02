@@ -26,6 +26,7 @@ cargo run -p zest-headless
 cargo run -p zest-text-demo
 cargo run -p zest-layout-demo
 cargo run -p zest-layout-text-demo
+cargo run -p zest-quad -- --layout
 cargo run -p zest-quad
 cargo run -p zest-quad -- --smoke
 cargo test --workspace --all-features --locked
@@ -116,6 +117,17 @@ reuse. The CI workflow includes it. The plain `layout` feature stays free of
 font/shaping dependencies. This adapter measures typography; automatic text
 painting, glyph atlases and width-keyed measurement caches beyond Taffy's own
 cache remain future work.
+
+`cargo run -p zest-quad -- --layout` opens a responsive text preview. Resizing
+reflows its labels and moves the following marker using scene layout bounds.
+It renders from the same shaped text used for measurement, retaining one
+paragraph/image per label. Unchanged widths, tint and position changes reuse
+those images; width/content/DPI changes rebuild them and retire old textures.
+GPU restoration can reupload the retained CPU paragraph without reshaping.
+The preview clips to the viewport, limits the readable column width, omits text
+when its content width is below one physical pixel and handles empty viewports.
+It demonstrates layout/painting; pointer/IME editing remains in the default
+demo. Esc closes either mode. The raster bitmap budgets still apply.
 
 ## Experimental GPU slice
 
@@ -494,6 +506,15 @@ text limit; measurement does not consume the bitmap dimension/pixel budget.
 Shapes retain their font data after the rasterizer is dropped. They are
 caller-owned; there is no global shaping cache or automatic font invalidation.
 The current shaping API is part of `text-raster`, including its dependencies.
+
+`Rasterizer::paragraph_from_shape(&shape, width)` reflows and rasterizes a saved
+shape into a `Paragraph` without font lookup or another shaping pass. Its width
+is logical and its fonts/font size/DPI come from the shape (`shape.scale()`).
+The receiving rasterizer needs no registered fonts. Raster width, dimension,
+pixel and mask budgets remain enforced, so zero width is valid for measurement
+but cannot produce a paragraph bitmap. The shape and prior paragraphs stay
+unchanged after success or failure; each new paragraph has its own selection
+snapshot identity. Retain it while only selection, tint or position changes.
 
 ```rust
 use zest::text::raster::{RasterOptions, Rasterizer};

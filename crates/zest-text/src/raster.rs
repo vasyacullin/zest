@@ -334,15 +334,49 @@ impl Rasterizer {
                 scale: options.scale,
             },
         )?;
-        let mut layout = shaped.layout;
-        layout.break_all_lines(Some(options.width * options.scale));
+        self.paragraph_layout(shaped.text, shaped.layout, options.width, shaped.scale)
+    }
+
+    /// Reflows and rasterizes an existing shape without font lookup or shaping.
+    /// The shape's font size, fonts and DPI are retained; width is logical. The
+    /// rasterizer needs no registered fonts, since the shape owns its font data.
+    /// Raster width/dimension/mask budgets still apply. Each result has a fresh
+    /// paragraph identity; retain it for selection-only or tint/position changes.
+    pub fn paragraph_from_shape(
+        &mut self,
+        shaped: &ShapedText,
+        width: f32,
+    ) -> Result<Paragraph, RasterError> {
+        self.paragraph_layout(
+            shaped.text.clone(),
+            shaped.layout.clone(),
+            width,
+            shaped.scale,
+        )
+    }
+
+    fn paragraph_layout(
+        &mut self,
+        text: String,
+        mut layout: Layout<()>,
+        width: f32,
+        scale: f32,
+    ) -> Result<Paragraph, RasterError> {
+        if !width.is_finite()
+            || width <= 0.0
+            || width * scale < 1.0
+            || width * scale > MAX_DIMENSION as f32
+        {
+            return Err(RasterError::InvalidOptions);
+        }
+        layout.break_all_lines(Some(width * scale));
         layout.align(Alignment::Start, AlignmentOptions::default());
         if !layout.width().is_finite() || !layout.height().is_finite() {
             return Err(RasterError::LayoutTooLarge);
         }
         let mut metrics = TextMetrics {
-            width: layout.width() / options.scale,
-            height: layout.height() / options.scale,
+            width: layout.width() / scale,
+            height: layout.height() / scale,
             lines: layout.lines().count(),
             ..TextMetrics::default()
         };
@@ -440,7 +474,7 @@ impl Rasterizer {
             height,
             origin_x: bounds.left,
             origin_y: bounds.top,
-            scale: options.scale,
+            scale,
             rgba8,
             metrics,
         };
@@ -448,7 +482,7 @@ impl Rasterizer {
             identity: Arc::new(()),
             bitmap,
             layout,
-            text: shaped.text,
+            text,
         })
     }
 }

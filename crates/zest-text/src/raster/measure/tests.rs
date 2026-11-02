@@ -12,6 +12,111 @@ fn rasterizer() -> Rasterizer {
 const FAMILIES: &[&str] = &["Noto Sans", "Noto Sans Arabic"];
 
 #[test]
+fn rasterization_from_a_shape_matches_direct_paragraphs_at_multiple_widths_and_dpi() {
+    let source = "office e\u{301} Привет\nلا العربية one two three";
+    let mut raster = rasterizer();
+    for scale in [1.0, 1.25, 1.5] {
+        let shaped = raster
+            .shape(
+                source,
+                FAMILIES,
+                ShapeOptions {
+                    font_size: 18.0,
+                    scale,
+                },
+            )
+            .unwrap();
+        assert_eq!(shaped.scale(), scale);
+        for width in [110.0, 400.0, 110.0] {
+            let cached = raster.paragraph_from_shape(&shaped, width).unwrap();
+            let direct = raster
+                .paragraph(
+                    source,
+                    FAMILIES,
+                    RasterOptions {
+                        font_size: 18.0,
+                        scale,
+                        width,
+                    },
+                )
+                .unwrap();
+            assert_eq!(cached.bitmap(), direct.bitmap());
+            assert_eq!(cached.text(), source);
+            assert_eq!(
+                cached.caret(source.len()).unwrap(),
+                direct.caret(source.len()).unwrap()
+            );
+            let measured = shaped.measure(MeasureWidth::Definite(width)).unwrap();
+            assert_eq!(measured.height, cached.bitmap().metrics.height);
+            assert_eq!(measured.lines, cached.bitmap().metrics.lines);
+        }
+    }
+}
+
+#[test]
+fn rasterization_from_a_shape_needs_no_registered_fonts_in_the_destination() {
+    let mut source = rasterizer();
+    let shaped = source
+        .shape("Привет العربية e\u{301}", FAMILIES, ShapeOptions::default())
+        .unwrap();
+    let expected = source.paragraph_from_shape(&shaped, 200.0).unwrap();
+    drop(source);
+    let mut destination = Rasterizer::new();
+    assert!(
+        destination
+            .paragraph(shaped.text(), FAMILIES, RasterOptions::default())
+            .is_err()
+    );
+    let restored = destination.paragraph_from_shape(&shaped, 200.0).unwrap();
+    assert_eq!(restored.bitmap(), expected.bitmap());
+}
+
+#[test]
+fn invalid_raster_widths_and_bitmap_budget_failures_leave_shapes_and_paragraphs_valid() {
+    let mut raster = rasterizer();
+    let shaped = raster
+        .shape(
+            "e\u{301} one two three",
+            FAMILIES,
+            ShapeOptions {
+                font_size: 18.0,
+                scale: 1.25,
+            },
+        )
+        .unwrap();
+    let paragraph = raster.paragraph_from_shape(&shaped, 100.0).unwrap();
+    let guard = paragraph
+        .layout_selection(crate::Selection::caret(0))
+        .unwrap();
+    for width in [0.0, -1.0, f32::NAN, f32::INFINITY, 4096.0] {
+        assert!(raster.paragraph_from_shape(&shaped, width).is_err());
+    }
+    assert!(shaped.measure(MeasureWidth::Definite(0.0)).is_ok());
+    let next = raster.paragraph_from_shape(&shaped, 100.0).unwrap();
+    assert_eq!(paragraph.bitmap(), next.bitmap());
+    paragraph.selection_caret(&guard).unwrap();
+    assert!(matches!(
+        next.selection_caret(&guard),
+        Err(RasterError::ForeignSelection)
+    ));
+    let large = raster
+        .shape(&"one\n".repeat(5000), FAMILIES, ShapeOptions::default())
+        .unwrap();
+    assert!(matches!(
+        raster.paragraph_from_shape(&large, 200.0),
+        Err(RasterError::LayoutTooLarge)
+    ));
+    assert!(large.measure(MeasureWidth::Definite(200.0)).is_ok());
+    assert_eq!(
+        raster
+            .paragraph_from_shape(&shaped, 100.0)
+            .unwrap()
+            .bitmap(),
+        paragraph.bitmap()
+    );
+}
+
+#[test]
 fn measuring_reflows_the_same_shape_and_matches_rasterized_line_metrics() {
     let text = "office Привет e\u{301} العربية one two three four five\nlast ";
     let mut raster = rasterizer();

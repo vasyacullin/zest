@@ -53,11 +53,14 @@ pub struct TextMeasurement {
 pub struct ShapedText {
     pub(super) text: String,
     pub(super) layout: Layout<()>,
-    scale: f32,
+    pub(super) scale: f32,
 }
 impl ShapedText {
     pub fn text(&self) -> &str {
         &self.text
+    }
+    pub fn scale(&self) -> f32 {
+        self.scale
     }
     pub fn measure(&self, width: MeasureWidth) -> Result<TextMeasurement, RasterError> {
         let width = match width {

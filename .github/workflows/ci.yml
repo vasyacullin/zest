@@ -30,6 +30,7 @@ jobs:
           icd=$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)
           test -n "$icd"
           VK_DRIVER_FILES="$icd" xvfb-run -a cargo run -p zest-quad --locked -- --smoke
+          VK_DRIVER_FILES="$icd" xvfb-run -a cargo run -p zest-quad --locked -- --layout --smoke
   msrv:
     runs-on: ubuntu-latest
     steps:

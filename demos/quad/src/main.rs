@@ -48,6 +48,7 @@ struct App {
     renderer: Option<Renderer>,
     demo_image: Option<ImageId>,
     text: text_render::TextDemo,
+    layout: Option<layout_render::LayoutDemo>,
     clipboard: clipboard::SystemClipboard,
     window: Option<Arc<Window>>,
     backend: Backend,
@@ -77,7 +78,19 @@ impl App {
         let window = self.window.as_ref().unwrap();
         let scale = ScaleFactor::new(window.scale_factor())?;
         let renderer = self.renderer.as_mut().unwrap();
-        self.text.prepare(renderer, window.scale_factor() as f32)?;
+        if let Some(layout) = &mut self.layout {
+            let size = window.inner_size();
+            layout.prepare(
+                renderer,
+                zest::geometry::Size::new(
+                    f64::from(size.width) / scale.get(),
+                    f64::from(size.height) / scale.get(),
+                ),
+                scale.get() as f32,
+            )?;
+        } else {
+            self.text.prepare(renderer, window.scale_factor() as f32)?;
+        }
         if self.text.input.focused
             && self.text.input.ime_enabled
             && let Some(area) = self.text.ime_area()
@@ -100,6 +113,8 @@ impl App {
         let clear_only = self.smoke && self.frames < 2;
         let list = if clear_only {
             DisplayList::default()
+        } else if let Some(layout) = &self.layout {
+            layout.paint()?
         } else {
             demo_list(self.hovered, self.demo_image.unwrap(), &self.text)?
         };
@@ -155,6 +170,7 @@ impl App {
                 upload_checks::check(renderer)?;
                 self.text.check(renderer)?;
                 text_render::check_editor(renderer)?;
+                layout_render::check(renderer)?;
                 if let Some(path) = &self.capture_path {
                     let size = window.inner_size();
                     let capture = renderer.capture_list(&list, scale, size.width, size.height)?;
@@ -379,7 +395,11 @@ impl ApplicationHandler for App {
             let window = Arc::new(
                 events.create_window(
                     Window::default_attributes()
-                        .with_title("Zest — direct HAL quad")
+                        .with_title(if self.layout.is_some() {
+                            "Zest — responsive text layout"
+                        } else {
+                            "Zest — direct HAL quad"
+                        })
                         .with_inner_size(LogicalSize::new(800.0, 500.0)),
                 )?,
             );
@@ -413,18 +433,24 @@ impl ApplicationHandler for App {
                 .collect();
             self.demo_image = Some(renderer.upload_rgba8(16, 16, &pixels)?);
             println!("Adapter: {}", renderer.adapter_name());
-            println!(
-                "Click/drag to edit; double-click selects words, triple-click selects displayed lines. Arrows move visually, Up/Down preserve the column, Shift selects. PageUp/PageDown move by viewport height. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
-            );
-            let word_modifier = if cfg!(target_os = "macos") {
-                "Option"
+            if self.layout.is_none() {
+                println!(
+                    "Click/drag to edit; double-click selects words, triple-click selects displayed lines. Arrows move visually, Up/Down preserve the column, Shift selects. PageUp/PageDown move by viewport height. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
+                );
+                let word_modifier = if cfg!(target_os = "macos") {
+                    "Option"
+                } else {
+                    "Ctrl"
+                };
+                println!(
+                    "{word_modifier}+Left/Right moves by words; add Shift to select. {word_modifier}+Backspace/Delete deletes by words."
+                );
             } else {
-                "Ctrl"
-            };
-            println!(
-                "{word_modifier}+Left/Right moves by words; add Shift to select. {word_modifier}+Backspace/Delete deletes by words."
-            );
-            self.text.focus(window.has_focus());
+                println!(
+                    "Layout preview: resize the window to reflow the text; Esc closes. Pointer/IME editing is available in the default demo."
+                );
+            }
+            self.text.focus(self.layout.is_none() && window.has_focus());
             window.set_ime_allowed(self.text.input.focused);
             window.request_redraw();
             self.window = Some(window);
@@ -439,6 +465,9 @@ impl ApplicationHandler for App {
     fn suspended(&mut self, _events: &ActiveEventLoop) {
         self.renderer = None;
         self.text.reset();
+        if let Some(layout) = &mut self.layout {
+            layout.reset_gpu();
+        }
         self.cursor = None;
         self.drag_tick = None;
         self.hovered = false;
@@ -452,6 +481,35 @@ impl ApplicationHandler for App {
         };
         if window.id() != id {
             return;
+        }
+        if self.layout.is_some() {
+            match &event {
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => {
+                    if !is_synthetic
+                        && event.state == ElementState::Pressed
+                        && event.logical_key
+                            == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                    {
+                        events.exit();
+                    }
+                    return;
+                }
+                WindowEvent::Focused(_) => {
+                    window.set_ime_allowed(false);
+                    return;
+                }
+                WindowEvent::Ime(_)
+                | WindowEvent::ModifiersChanged(_)
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorLeft { .. } => return,
+                _ => {}
+            }
         }
         match event {
             WindowEvent::CloseRequested => events.exit(),
@@ -679,12 +737,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::set_logger(&LOGGER).expect("single demo logger");
     log::set_max_level(log::LevelFilter::Warn);
     let mut smoke = false;
+    let mut layout_preview = false;
     let mut backend = Backend::Auto;
     let mut capture_path = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--smoke" => smoke = true,
+            "--layout" => layout_preview = true,
             "--backend" => {
                 backend = args
                     .next()
@@ -699,7 +759,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "zest-quad [--backend auto|dx12|vulkan|metal] [--smoke] [--capture image.ppm]\n--backend: native API (default auto; explicit choices never fall back)\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
+                    "zest-quad [--layout] [--backend auto|dx12|vulkan|metal] [--smoke] [--capture image.ppm]\n--layout: responsive scene/text layout preview (resize; Esc closes)\n--backend: native API (default auto; explicit choices never fall back)\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
                 );
                 return Ok(());
             }
@@ -711,6 +771,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         renderer: None,
         demo_image: None,
         text: text_render::TextDemo::new()?,
+        layout: if layout_preview {
+            Some(layout_render::LayoutDemo::new()?)
+        } else {
+            None
+        },
         clipboard: clipboard::SystemClipboard::default(),
         window: None,
         backend,
@@ -754,6 +819,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 mod clipboard;
 mod image_checks;
+mod layout_render;
 mod text_input;
 mod text_render;
 mod upload_checks;
