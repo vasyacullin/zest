@@ -28,6 +28,7 @@ mod scrollbar_input;
 mod semantic_checks;
 mod semantic_diff_checks;
 mod semantic_target_checks;
+mod semantic_view_checks;
 
 const CLIP_HEIGHT: f64 = 96.25;
 
@@ -1080,6 +1081,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     metadata_checks::check(&mut demo, renderer)?;
     semantic_diff_checks::check(&mut demo, renderer)?;
     semantic_target_checks::check(&mut demo, renderer)?;
+    semantic_view_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;

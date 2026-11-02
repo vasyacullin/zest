@@ -123,6 +123,33 @@ Use freshly computed geometry before positional input; old snapshots remain
 immutable and cannot detect scene edits on their own. This initial path tests
 rectangular bounds with effective ancestor clips; transforms are not supported.
 
+`layout.semantic_view(&semantic_snapshot)` creates an immutable `SemanticView`
+in `zest::layout`, joining published observations by `WidgetId`. Clones retain the
+same layout/semantic data. `nodes()` follows semantic declaration order; `node(id)`,
+`find(query)` and `find_all(query)` expose a `SemanticViewNode` with its semantic
+node and optional `&LayoutBox`. Missing geometry stays distinguishable from a known
+box outside the viewport or ancestor clip. Projected/unscrolled bounds, clips and
+scroll metrics remain available through that geometry.
+
+`visible_bounds()` and `is_visible()` use positive logical border area after
+viewport/ancestor clipping. `find_visible(query)` applies this filter before requiring
+a unique match; `find_visible_target` binds that match's observed semantic generation.
+Missing/empty/fully clipped geometry is excluded, while disabled/modal-blocked nodes
+remain unless the semantic query filters them. Use `input_allowed(true)` for an
+input policy. `hit_test(point, |node| accepts(node))` shares layout's reverse painter
+order and half-open clips, supplying semantic nodes to the predicate and skipping
+layout-only nodes. Rectangular visibility does not test occlusion or minimum
+physical-pixel extent; custom overlays/transforms remain application concerns.
+
+Pair compatible, current snapshots from the same synchronized scene before input.
+Joining does not certify provenance or layout/style freshness. Target generations
+come from the semantic observation, so reusing identical layout never upgrades an
+old semantic binding to a recreated node. Current scene checks, window ownership
+and visibility policy still apply when acting. Constructing/querying a view runs no
+layout, shaping, uploads or state mutation; the default layout feature stays font/GPU
+independent. Headless and GPU smoke compare semantic hits/visible targets with scene
+input and rendered pixels across clipping and scrolling.
+
 `Style::clip_children` (default false) intersects descendants' clips with that
 node's border bounds, in logical coordinates. It affects both axes and propagates
 through nonclipping descendants. A nonclipping parent permits overflow; an empty

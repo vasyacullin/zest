@@ -2,6 +2,7 @@ use zest::{
     Scene,
     geometry::{Point, Size},
     layout::{Axis, Edges, LayoutTree, Length, Style},
+    semantics::{SemanticQuery, SemanticRole},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,6 +79,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .clone();
     assert_eq!(target, first);
+    let view = reordered.snapshot.semantic_view(&scene.semantic_snapshot());
+    let query = SemanticQuery::new()
+        .role(SemanticRole::Button)
+        .named("First")
+        .input_allowed(true);
+    let inspected = view.find_visible(query)?;
+    assert_eq!(inspected.semantic.id, first);
+    assert_eq!(
+        view.hit_test(point, |node| node.role == SemanticRole::Button
+            && node.state.input_allowed)
+            .unwrap()
+            .semantic
+            .id,
+        first
+    );
+    assert!(view.find_visible_target(query)?.focus(&mut scene));
     assert_eq!(
         initial.snapshot.hit_test(point, |id| id != &toolbar),
         Some(&second)
@@ -109,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(list.len(), 2);
     println!("Reordered retained nodes: {sync:?}; {:?}", reordered.stats);
     println!(
-        "Layout smoke passed: fractional logical bounds, keyed reorder/diff, geometry paint invalidation, current-snapshot hit testing, focus/hover, cache reuse, immutable snapshots and display-list geometry."
+        "Layout smoke passed: fractional logical bounds, keyed reorder/diff, geometry paint invalidation, semantic visibility/hit/target queries, focus/hover, cache reuse, immutable snapshots and display-list geometry."
     );
     Ok(())
 }

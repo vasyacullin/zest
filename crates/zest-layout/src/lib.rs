@@ -26,6 +26,7 @@ mod reveal;
 mod scroll;
 mod scroll_chain;
 mod scrollbar;
+mod semantic_view;
 mod style;
 #[cfg(feature = "text")]
 mod text;
@@ -34,6 +35,7 @@ pub use reveal::{RevealPlan, ScrollAdjustment};
 pub use scroll::ScrollMetrics;
 pub use scroll_chain::ScrollPlan;
 pub use scrollbar::{ScrollbarGeometry, ScrollbarPart};
+pub use semantic_view::{SemanticView, SemanticViewNode};
 use std::{
     collections::{HashMap, HashSet},
     fmt,
