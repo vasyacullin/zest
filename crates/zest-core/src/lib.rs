@@ -1,8 +1,10 @@
 //! Persistent UI scene. Updates declare a complete scene or the complete children
 //! of one container. Widget keys are explicit, independent of labels and order.
+mod focus;
 pub mod geometry;
 pub mod input;
 pub mod resource;
+pub use focus::FocusDirection;
 
 use bevy_ecs::prelude::{Component, Entity, World};
 use std::{
@@ -45,6 +47,14 @@ impl WidgetState {
     const FOCUSED: u8 = 2;
     const PAINT_DIRTY: u8 = 4;
     const PRESSED: u8 = 8;
+    const LOCAL_DISABLED: u8 = 16;
+    const DISABLED: u8 = 32;
+    const POINTER_CAPTURE: u8 = 64;
+    const KEY_CAPTURE: u8 = 128;
+    /// Effective availability, including disabled ancestors. New nodes are enabled.
+    pub fn enabled(self) -> bool {
+        self.0 & Self::DISABLED == 0
+    }
     pub fn hovered(self) -> bool {
         self.0 & Self::HOVERED != 0
     }
@@ -292,10 +302,15 @@ impl Scene {
                     stats.updated += 1;
                 }
             } else {
-                let entity = self
-                    .world
-                    .spawn((node, WidgetState(WidgetState::PAINT_DIRTY)))
-                    .id();
+                let mut state = WidgetState(WidgetState::PAINT_DIRTY);
+                if node
+                    .parent
+                    .as_ref()
+                    .is_some_and(|parent| !self.state(parent).unwrap().enabled())
+                {
+                    state.set(WidgetState::DISABLED, true);
+                }
+                let entity = self.world.spawn((node, state)).id();
                 self.entities.insert(id, entity);
                 stats.created += 1;
             }
@@ -364,15 +379,18 @@ impl Scene {
             .world
             .get_mut::<WidgetState>(entity)
             .expect("scene state");
+        if hovered && !state.enabled() {
+            return false;
+        }
         if state.hovered() != hovered {
             state.set(WidgetState::HOVERED, hovered);
             state.set(WidgetState::PAINT_DIRTY, true);
         }
         true
     }
-    /// Unknown targets do not disturb the current focus.
+    /// Unknown or disabled targets do not disturb the current focus.
     pub fn focus(&mut self, id: &WidgetId) -> bool {
-        if !self.entities.contains_key(id) {
+        if self.state(id).is_none_or(|state| !state.enabled()) {
             return false;
         }
         if self.focused.as_ref() == Some(id) {
@@ -395,6 +413,10 @@ impl Scene {
                 .get_mut::<WidgetState>(self.entities[&id])
                 .expect("scene state");
             state.set(WidgetState::FOCUSED, false);
+            if state.0 & WidgetState::KEY_CAPTURE != 0 {
+                state.set(WidgetState::KEY_CAPTURE, false);
+                state.set(WidgetState::PRESSED, false);
+            }
             state.set(WidgetState::PAINT_DIRTY, true);
         }
     }
@@ -409,6 +431,8 @@ impl Scene {
     }
 }
 
+#[cfg(test)]
+mod availability_tests;
 #[cfg(test)]
 mod reconciliation_tests;
 

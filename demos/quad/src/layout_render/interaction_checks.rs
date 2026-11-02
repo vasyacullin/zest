@@ -130,6 +130,7 @@ pub(super) fn check(
         [255; 4],
     )?;
     demo.focus_window(true);
+    availability_checks(demo, renderer, point)?;
     demo.prepare(renderer, snapshot.viewport(), 1.25)?;
     demo.labels[0]
         .prepared
@@ -150,8 +151,64 @@ pub(super) fn check(
         return Err("hover/focus/activation changed layout, text images or ECS archetypes".into());
     }
     println!(
-        "GPU layout input checks passed: hover/pressed/selection/Enter/Space/Tab/focus-loss pixels, repeat filtering, shared snapshot/paragraph/images and stable ECS archetypes"
+        "GPU layout input checks passed: hover/pressed/selection/disabled pixels, Enter/Space/F2/Tab, focus loss, repeat filtering, shared snapshot/paragraph/images and stable ECS archetypes"
     );
+    Ok(())
+}
+fn availability_checks(
+    demo: &mut LayoutDemo,
+    renderer: &mut Renderer,
+    point: Point<Logical>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let footer = demo.footer.clone();
+    let title = demo.labels[0].id.clone();
+    let tab = Key::Named(NamedKey::Tab);
+    let f2 = Key::Named(NamedKey::F2);
+    demo.pointer_moved(point);
+    demo.pointer_press();
+    demo.set_enabled(&footer, false);
+    if demo.pointer_release()
+        || demo.scene.focused().is_some()
+        || demo.hovered.is_some()
+        || demo.selected.is_some()
+        || demo.activation.captured().is_some()
+    {
+        return Err("disabling a layout node retained or completed its gesture".into());
+    }
+    let image = capture(demo, renderer)?;
+    expect_pixel(
+        &image,
+        (point.x * 1.25) as u32,
+        (point.y * 1.25) as u32,
+        [97, 97, 97, 255],
+    )?;
+    demo.pointer_press();
+    if demo.pointer_release() || demo.scene.focused().is_some() {
+        return Err("disabled layout node accepted another click".into());
+    }
+    demo.key(&tab, true, false);
+    demo.key(&tab, true, false);
+    if demo.scene.focused() != Some(&demo.labels[1].id)
+        || !demo.key(&f2, true, false)
+        || demo.scene.focused().is_some()
+    {
+        return Err("F2 did not disable and unfocus the body label".into());
+    }
+    demo.key(&tab, true, false);
+    if demo.scene.focused() != Some(&title) || demo.key(&tab, true, false) {
+        return Err("focus traversal did not skip disabled layout nodes".into());
+    }
+    demo.key(&f2, true, false);
+    demo.set_enabled(&footer, true);
+    demo.focus_window(false);
+    demo.focus_window(true);
+    demo.set_enabled(&title, false);
+    let image = capture(demo, renderer)?;
+    let (x, y) = opaque_title_pixel(demo);
+    expect_pixel(&image, x, y, [116, 144, 160, 255])?;
+    demo.set_enabled(&title, true);
+    let image = capture(demo, renderer)?;
+    expect_pixel(&image, x, y, [188, 231, 255, 255])?;
     Ok(())
 }
 fn capture(

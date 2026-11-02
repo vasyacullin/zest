@@ -282,3 +282,66 @@ fn selection_survives_keyed_reorder_and_is_cleared_by_removal() {
     demo.update_geometry(Size::new(480.0, 450.0), 1.25).unwrap();
     assert!(demo.selected.is_none());
 }
+
+#[test]
+fn f2_disables_body_clears_its_interaction_and_tab_skips_it_without_reflow() {
+    let mut demo = demo();
+    let body = demo.labels[1].id.clone();
+    let title = demo.labels[0].id.clone();
+    let snapshot = demo.snapshot.as_ref().unwrap().clone();
+    let archetypes = demo.scene.stats().archetypes;
+    let f2 = Key::Named(NamedKey::F2);
+    demo.pointer_moved(center(&demo, &body));
+    demo.pointer_press();
+    assert!(demo.scene.state(&body).unwrap().pressed());
+    assert!(demo.key(&f2, true, false));
+    assert!(demo.scene.focused().is_none() && demo.hovered.is_none());
+    assert!(!demo.scene.state(&body).unwrap().enabled());
+    assert!(!demo.pointer_release());
+    assert!(!demo.key(&f2, false, false));
+    assert!(!demo.key_event(&f2, true, true, false));
+    assert!(!demo.key(&f2, true, true));
+    tab(&mut demo);
+    assert_eq!(demo.scene.focused(), Some(&title));
+    tab(&mut demo);
+    assert_eq!(demo.scene.focused(), Some(&demo.footer));
+    demo.modifiers(ModifiersState::SHIFT);
+    tab(&mut demo);
+    assert_eq!(demo.scene.focused(), Some(&title));
+    demo.modifiers(ModifiersState::CONTROL);
+    assert!(!demo.key(&f2, true, false));
+    demo.modifiers(ModifiersState::empty());
+    assert!(demo.key(&f2, true, false));
+    assert!(demo.scene.state(&body).unwrap().enabled());
+    assert_eq!(demo.hovered.as_ref(), Some(&body));
+    assert_eq!(demo.scene.focused(), Some(&title));
+    assert!(demo.selected.is_none());
+    assert!(!demo.update_geometry(snapshot.viewport(), 1.25).unwrap());
+    assert!(snapshot.same_snapshot(demo.snapshot.as_ref().unwrap()));
+    assert_eq!(demo.scene.stats().archetypes, archetypes);
+}
+
+#[test]
+fn disabling_a_selected_node_retains_selection_but_cancels_keyboard_activation() {
+    let mut demo = demo();
+    let body = demo.labels[1].id.clone();
+    demo.pointer_moved(center(&demo, &body));
+    demo.pointer_press();
+    demo.pointer_release();
+    assert_eq!(demo.selected.as_ref(), Some(&body));
+    let enter = Key::Named(NamedKey::Enter);
+    demo.key(&enter, true, false);
+    demo.set_enabled(&body, false);
+    demo.set_enabled(&body, true);
+    demo.set_focus(Some(body.clone()));
+    assert!(!demo.key(&enter, false, false));
+    assert_eq!(demo.selected.as_ref(), Some(&body));
+    demo.key(&enter, true, false);
+    demo.key(&enter, false, false);
+    assert!(demo.selected.is_none());
+    demo.set_enabled(&demo.root.clone(), false);
+    assert!(!tab(&mut demo));
+    assert!(demo.scene.focused().is_none());
+    assert!(!demo.pointer_press());
+    assert!(!demo.pointer_release());
+}

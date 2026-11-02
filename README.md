@@ -141,6 +141,9 @@ away disarms the press without transferring capture; moving back re-arms it.
 Blank-space presses clear focus. Tab/Shift+Tab cycles visible interactive nodes
 in declaration order. Enter/Space toggles selection on release; repeats and
 synthetic keys cannot activate nodes. Unsupported modifiers cancel a pending press.
+F2 toggles the body label's enabled state. Disabled labels are dimmed, reject
+pointer/keyboard activation and are skipped by Tab; selection stays retained.
+Re-enabling re-hits a stationary pointer without restoring the old focus/press.
 Fully clipped or subpixel-sized targets are skipped. Geometry is refreshed before
 pointer/keyboard input, and resize re-hits a stationary pointer. DPI changes discard
 stale pointer coordinates; focus remains on the keyed node while it is visible.
@@ -166,6 +169,23 @@ changes, and `reset` when the window loses input ownership. Cancellation retains
 held-input latches until release; reset forgets them. Reset with the owning scene
 before dropping/switching controllers. Capture is logical: the window backend
 must deliver releases outside its bounds; the controller does not grab the cursor.
+
+`Scene::set_enabled(id, enabled)` changes a retained local setting. Its effective
+value, `WidgetState::enabled()`, includes disabled ancestors; an enabled child
+cannot override a disabled container. `Scene::locally_enabled` reads the local
+setting. New children inherit effective availability, including during partial
+updates. Reorders and label changes retain local settings; deletion resets them.
+Disabling walks only the affected subtree, marks changed appearance dirty, and
+immediately clears hover/focus/pressed/capture flags. Re-enabling before another
+input event cannot revive an old gesture. These flags share the existing ECS
+component and do not affect layout or archetypes. `focus` and `set_hovered(true)`
+reject disabled targets. Update the caller's hit targets after availability changes.
+
+`Scene::focus_next(FocusDirection::{Forward, Backward}, predicate)` cycles enabled
+buttons in declaration preorder, wraps, and skips containers/disabled subtrees.
+The predicate supplies application eligibility, such as current viewport bounds.
+An excluded old focus starts at the first/last candidate; no candidates clears
+focus. It returns whether focus changed. The preview uses this shared traversal.
 
 ## Experimental GPU slice
 

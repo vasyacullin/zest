@@ -42,24 +42,41 @@ struct Target {
     id: WidgetId,
     entity: Entity,
     world: WorldId,
+    capture: u8,
 }
 impl Target {
-    fn new(scene: &Scene, id: Option<&WidgetId>) -> Option<Self> {
+    fn new(scene: &mut Scene, id: Option<&WidgetId>, capture: u8) -> Option<Self> {
         let id = id?;
+        if !scene.state(id)?.enabled() {
+            return None;
+        }
+        let entity = *scene.entities.get(id)?;
+        scene
+            .world
+            .get_mut::<WidgetState>(entity)
+            .unwrap()
+            .set(capture, true);
         Some(Self {
             id: id.clone(),
-            entity: *scene.entities.get(id)?,
+            entity,
             world: scene.world.id(),
+            capture,
         })
     }
     fn live(&self, scene: &Scene) -> bool {
         self.world == scene.world.id() && scene.entities.get(&self.id) == Some(&self.entity)
     }
     fn matches(&self, scene: &Scene, id: Option<&WidgetId>) -> bool {
-        Some(&self.id) == id && self.live(scene)
+        Some(&self.id) == id && self.valid(scene)
+    }
+    fn valid(&self, scene: &Scene) -> bool {
+        self.live(scene)
+            && scene
+                .state(&self.id)
+                .is_some_and(|state| state.enabled() && state.0 & self.capture != 0)
     }
     fn pressed(&self, scene: &mut Scene, pressed: bool) -> bool {
-        if !self.live(scene) {
+        if !self.valid(scene) {
             return false;
         }
         let mut state = scene.world.get_mut::<WidgetState>(self.entity).unwrap();
@@ -70,12 +87,24 @@ impl Target {
         }
         changed
     }
+    fn end(&self, scene: &mut Scene) -> bool {
+        let changed = self.pressed(scene, false);
+        if self.live(scene) {
+            scene
+                .world
+                .get_mut::<WidgetState>(self.entity)
+                .unwrap()
+                .set(self.capture, false);
+        }
+        changed
+    }
 }
 
 /// Press/release pairing with one activation per gesture. Pointer capture never
 /// transfers to a sibling: leaving disarms it, re-entering re-arms it. Enter and
 /// Space activate on matching release while the original widget remains focused.
-/// Repeats, synthetic keys, stale ECS generations and foreign scenes cannot fire.
+/// Repeats, synthetic keys, disabled nodes, stale ECS generations and foreign
+/// scenes cannot fire. Disabling a captured node irrevocably cancels that gesture.
 ///
 /// Call [`Self::cancel`] when geometry or eligibility changes, and
 /// [`Self::reset`] on window focus loss/suspension. A controller must not be
@@ -101,30 +130,33 @@ pub struct ActivationState {
     held_keys: u8,
 }
 impl ActivationState {
+    /// Cached pointer target. Reconcile scene/focus/availability changes before
+    /// querying it; revoked ownership cannot activate even before reconciliation.
     pub fn captured(&self) -> Option<&WidgetId> {
         self.pointer.as_ref().map(|target| &target.id)
     }
     pub fn pointer_down(&self) -> bool {
         self.pointer_down
     }
-    /// Clear captures for removed/replaced nodes and keyboard focus changes.
+    /// Clear captures for removed/replaced/disabled nodes and keyboard focus changes.
     /// Call after scene reconciliation, before painting or delivering more input.
     pub fn reconcile(&mut self, scene: &mut Scene) -> bool {
         let mut changed = false;
         if self
             .pointer
             .as_ref()
-            .is_some_and(|target| !target.live(scene))
+            .is_some_and(|target| !target.valid(scene))
+            && let Some(target) = self.pointer.take()
         {
-            self.pointer = None;
+            changed |= target.end(scene);
         }
         if self
             .keyboard
             .as_ref()
-            .is_some_and(|(target, _)| !target.live(scene) || scene.focused() != Some(&target.id))
+            .is_some_and(|(target, _)| !target.valid(scene) || scene.focused() != Some(&target.id))
             && let Some((target, _)) = self.keyboard.take()
         {
-            changed |= target.pressed(scene, false);
+            changed |= target.end(scene);
         }
         changed
     }
@@ -138,7 +170,7 @@ impl ActivationState {
         }
         changed |= self.cancel(scene);
         self.pointer_down = true;
-        self.pointer = Target::new(scene, hit);
+        self.pointer = Target::new(scene, hit, WidgetState::POINTER_CAPTURE);
         if let Some(target) = &self.pointer {
             changed |= target.pressed(scene, true);
         }
@@ -158,8 +190,9 @@ impl ActivationState {
         let mut changed = self.reconcile(scene);
         self.pointer_down = false;
         let activated = self.pointer.take().and_then(|target| {
-            changed |= target.pressed(scene, false);
-            target.matches(scene, hit).then_some(Activation {
+            let matches = target.matches(scene, hit);
+            changed |= target.end(scene);
+            matches.then_some(Activation {
                 widget: target.id,
                 source: ActivationSource::Pointer,
             })
@@ -194,7 +227,7 @@ impl ActivationState {
                 && !self.pointer_down
                 && self.keyboard.is_none()
                 && focused == scene.focused()
-                && let Some(target) = Target::new(scene, focused)
+                && let Some(target) = Target::new(scene, focused, WidgetState::KEY_CAPTURE)
             {
                 changed |= target.pressed(scene, true);
                 self.keyboard = Some((target, key));
@@ -211,8 +244,9 @@ impl ActivationState {
             .is_some_and(|(_, armed)| *armed == key)
         {
             let (target, _) = self.keyboard.take().unwrap();
-            changed |= target.pressed(scene, false);
-            target.matches(scene, focused).then_some(Activation {
+            let matches = target.matches(scene, focused);
+            changed |= target.end(scene);
+            matches.then_some(Activation {
                 widget: target.id,
                 source: ActivationSource::Keyboard(key),
             })
@@ -229,10 +263,10 @@ impl ActivationState {
     pub fn cancel(&mut self, scene: &mut Scene) -> bool {
         let mut changed = false;
         if let Some(target) = self.pointer.take() {
-            changed |= target.pressed(scene, false);
+            changed |= target.end(scene);
         }
         if let Some((target, _)) = self.keyboard.take() {
-            changed |= target.pressed(scene, false);
+            changed |= target.end(scene);
         }
         changed
     }

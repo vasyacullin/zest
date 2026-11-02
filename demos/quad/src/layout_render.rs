@@ -1,7 +1,7 @@
 //! Responsive scene/layout/text preview. Retains one paragraph/image per label.
 use super::*;
 use zest::{
-    Scene, WidgetId,
+    FocusDirection, Scene, WidgetId,
     geometry::Size,
     input::{ActivationKey, ActivationState, InputResult},
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, Style, TextContent},
@@ -239,7 +239,7 @@ impl LayoutDemo {
     }
     fn interactive(&self, id: &WidgetId) -> bool {
         (id == &self.footer || self.labels.iter().any(|label| &label.id == id))
-            && self.scene.state(id).is_some()
+            && self.scene.state(id).is_some_and(|state| state.enabled())
     }
     fn visible(&self, id: &WidgetId) -> bool {
         self.snapshot.as_ref().is_some_and(|snapshot| {
@@ -284,6 +284,23 @@ impl LayoutDemo {
                 true
             }
         }
+    }
+    fn set_enabled(&mut self, id: &WidgetId, enabled: bool) -> bool {
+        if self
+            .scene
+            .locally_enabled(id)
+            .is_none_or(|old| old == enabled)
+        {
+            return false;
+        }
+        self.scene.set_enabled(id, enabled);
+        self.activation.reconcile(&mut self.scene);
+        let target = self
+            .pointer
+            .filter(|_| self.window_focused)
+            .and_then(|point| self.hit(point));
+        self.set_hovered(target);
+        true
     }
     pub fn pointer_moved(&mut self, point: Point<Logical>) -> bool {
         if !self.window_focused || !point.x.is_finite() || !point.y.is_finite() {
@@ -369,6 +386,16 @@ impl LayoutDemo {
         if !self.window_focused || synthetic {
             return false;
         }
+        if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F2) {
+            if !pressed || repeat || self.unsupported_modifiers() {
+                return false;
+            }
+            let body = self.labels[1].id.clone();
+            let Some(enabled) = self.scene.locally_enabled(&body) else {
+                return false;
+            };
+            return self.set_enabled(&body, !enabled);
+        }
         let activation_key = match key {
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
                 Some(ActivationKey::Enter)
@@ -407,24 +434,18 @@ impl LayoutDemo {
             return false;
         };
         let cancelled = self.activation.cancel(&mut self.scene);
-        let order: Vec<_> = snapshot
+        let eligible: std::collections::HashSet<_> = snapshot
             .boxes()
             .iter()
             .filter(|node| self.interactive(&node.id) && self.visible(&node.id))
             .map(|node| node.id.clone())
             .collect();
-        if order.is_empty() {
-            return self.set_focus(None) || cancelled;
-        }
-        let current = order.iter().position(|id| Some(id) == self.scene.focused());
-        let index = if self.modifiers.shift_key() {
-            current.map_or(order.len() - 1, |index| {
-                (index + order.len() - 1) % order.len()
-            })
+        let direction = if self.modifiers.shift_key() {
+            FocusDirection::Backward
         } else {
-            current.map_or(0, |index| (index + 1) % order.len())
+            FocusDirection::Forward
         };
-        self.set_focus(Some(order[index].clone())) || cancelled
+        self.scene.focus_next(direction, |id| eligible.contains(id)) || cancelled
     }
     pub fn paint(&self) -> Result<DisplayList, PaintError> {
         let Some(snapshot) = &self.snapshot else {
@@ -449,7 +470,9 @@ impl LayoutDemo {
                                 let state = self.scene.state(&self.footer).unwrap();
                                 painter.quad(Quad {
                                     bounds,
-                                    color: if state.pressed() {
+                                    color: if !state.enabled() {
+                                        [0.12, 0.12, 0.12, 1.0]
+                                    } else if state.pressed() {
                                         [0.05, 0.3, 0.6, 1.0]
                                     } else if self.selected.as_ref() == Some(&self.footer) {
                                         [0.1, 0.75, 0.3, 1.0]
@@ -501,6 +524,11 @@ impl LayoutDemo {
                             ),
                         );
                         image.tint = self.tint;
+                        if !state.enabled() {
+                            for channel in &mut image.tint[..3] {
+                                *channel *= 0.35;
+                            }
+                        }
                         painter.image(image)?;
                         if self.selected.as_ref() == Some(&label.id) && !bounds.is_empty() {
                             let height = bounds.size.height.min(2.0);
@@ -511,7 +539,11 @@ impl LayoutDemo {
                                     bounds.size.width,
                                     height,
                                 ),
-                                color: [0.1, 0.75, 0.3, 1.0],
+                                color: if state.enabled() {
+                                    [0.1, 0.75, 0.3, 1.0]
+                                } else {
+                                    [0.12, 0.12, 0.12, 1.0]
+                                },
                             })?;
                         }
                     }

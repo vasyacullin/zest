@@ -156,7 +156,8 @@ fn keyboard_requires_a_real_pair_on_the_original_focus_and_ignores_repeats() {
     }
     key(&mut input, &mut scene, ActivationKey::Enter, true);
     scene.focus(&b);
-    assert!(input.reconcile(&mut scene));
+    assert!(!scene.state(&a).unwrap().pressed());
+    input.reconcile(&mut scene);
     scene.focus(&a);
     assert!(
         key(&mut input, &mut scene, ActivationKey::Enter, false)
