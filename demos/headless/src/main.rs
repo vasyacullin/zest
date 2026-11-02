@@ -1,6 +1,7 @@
 use zest::Scene;
 use zest::commands::SceneCommands;
 use zest::event::{EventControl, EventHandlers, EventPhase};
+use zest::semantics::{SemanticQuery, SemanticRole};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scene = Scene::default();
@@ -77,6 +78,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Application visual changes invalidate paint explicitly; draining leaves the scene clean."
     );
     let mut commands = SceneCommands::new(&scene);
+    let before = scene.semantic_snapshot();
+    let query = SemanticQuery::new()
+        .role(SemanticRole::Button)
+        .named("Updated action");
+    assert_eq!(before.find(query)?.id, retained);
+    assert!(before.node(&retained).unwrap().state.enabled);
     scene
         .dispatch_event(&retained, &mut (), |ctx, _| {
             if ctx.phase == EventPhase::Target {
@@ -89,7 +96,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = commands.apply(&mut scene).unwrap();
     assert_eq!(stats.applied, 1);
     assert!(!scene.state(&retained).unwrap().enabled());
+    let current = scene.semantic_snapshot();
+    assert_eq!(current.find(query.enabled(false))?.id, retained);
+    assert!(before.node(&retained).unwrap().state.enabled);
     println!("Deferred scene command applied after dispatch: {stats:?}.");
+    println!(
+        "Semantic query found the disabled button by role/name; old snapshot remains enabled."
+    );
     println!("Headless demo: run zest-quad for the experimental window/GPU slice.");
     Ok(())
 }

@@ -19,6 +19,7 @@ pub use zest_core::event;
 pub use zest_core::geometry;
 pub use zest_core::input;
 pub use zest_core::resource;
+pub use zest_core::semantics;
 pub use zest_core::{
     FocusDirection, NodeKind, PaintInvalidation, ReconcileError, Scene, SceneStats, Ui,
     UpdateStats, WidgetId, WidgetState,

@@ -7,7 +7,7 @@ through `wgpu-hal`, targeting desktop and mobile applications and tools.
 **Current implementation includes a headless scene, optional Flexbox layout and an experimental HAL quad demo.**
 The scene provides scoped widget identities,
 validation of scene/subtree declarations before mutation, persistent ECS nodes
-and interaction flags, synchronous typed event routing, plus typed coordinate spaces and DPI conversion.
+and interaction flags, typed event routing, semantic inspection, plus typed coordinate spaces and DPI conversion.
 The separate GPU slice opens a window and renders ordered, clipped quad batches.
 An optional text model provides Unicode editing, transient IME composition and
 bounded undo/redo. Optional paragraph layout/rasterization renders Latin,
@@ -463,6 +463,35 @@ This API manages input boundaries; applications paint overlays/portals, filter
 visibility and handle outside clicks or window lifecycle. The preview retains
 focus on outside clicks, keeps scopes across window blur, and clears clipped
 restored focus using current geometry. Full dialog/overlay widgets remain future work.
+
+## Semantic inspection
+
+`Scene::semantic_snapshot()` copies the hierarchy, names, roles and interaction
+state into an immutable `zest::semantics::SemanticSnapshot`. Clones share owned
+data; old observations remain readable after reconciliation without borrowing the
+scene. `nodes()` follows declaration preorder, `roots()` retains root order, and
+`node(id)` looks up the same stable `WidgetId` used by layout/events. Identity-only
+scopes are omitted. `SemanticNode` exposes parent/children, the scene label as its
+name, and `SemanticRole::{Group, Button}` for containers/buttons. Containers initially
+have empty names. State reports effective enabled, focused, hovered, pressed and
+input-allowed values; the last includes the current modal boundary. Paint/capture
+bookkeeping is excluded, and reading snapshots never consumes paint work.
+
+`snapshot.find(SemanticQuery::new().role(SemanticRole::Button).named("Save"))`
+requires exactly one match. No match returns `FindError::NotFound`; ambiguity
+returns `FindError::Ambiguous` with all matching IDs in declaration order.
+`find_all(query)` returns every match. Query filters `role`, `named`, `id`, `within`,
+`enabled` and `input_allowed` combine with AND. Names match exactly, including case
+and Unicode. `within(id)` includes that node and its descendants; an unknown scope
+matches none. Disabled and modal-blocked nodes stay observable unless filtered out.
+
+These initial snapshots copy the scene and queries scan their nodes. Roles/names
+are derived from the current basic widgets; custom semantic metadata, semantic
+actions and platform accessibility bridges remain future work. IDs describe paths,
+so snapshots do not validate entity generations or queued actions. Query fresh
+data and join with current layout/visibility before routing input or binding scene
+commands. Headless and GPU smoke exercise semantic queries, immutable observations,
+gesture state and modal/disabled eligibility alongside the existing input path.
 
 ## Experimental GPU slice
 

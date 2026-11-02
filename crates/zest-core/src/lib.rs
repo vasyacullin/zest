@@ -9,6 +9,7 @@ mod modal;
 mod paint_invalidation;
 pub use paint_invalidation::PaintInvalidation;
 pub mod resource;
+pub mod semantics;
 pub use focus::FocusDirection;
 
 use bevy_ecs::prelude::{Component, Entity, World};
