@@ -8,7 +8,7 @@ use zest::{
     paint::Painter,
     text::{
         Selection,
-        raster::{Paragraph, RasterOptions, Rasterizer, TextRect},
+        raster::{LayoutSelection, Paragraph, RasterOptions, Rasterizer, TextRect},
     },
 };
 
@@ -19,9 +19,9 @@ const VIEW_WIDTH: f64 = 320.0;
 const VIEW_HEIGHT: f64 = 68.0;
 const VIEW: Rect<Logical> = Rect::from_xywh(300.0, 280.0, VIEW_WIDTH, VIEW_HEIGHT);
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Drag {
-    anchor: usize,
+    anchor: LayoutSelection,
     pointer: Point<Logical>,
 }
 
@@ -35,6 +35,7 @@ pub(super) struct TextDemo {
     scroll_y: f64,
     follow_caret: bool,
     drag: Option<Drag>,
+    navigation: Option<LayoutSelection>,
 }
 impl TextDemo {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -53,6 +54,7 @@ impl TextDemo {
             scroll_y: 0.0,
             follow_caret: true,
             drag: None,
+            navigation: None,
         })
     }
     pub fn reset(&mut self) {
@@ -61,6 +63,7 @@ impl TextDemo {
         self.input.focus(false);
         self.end_drag();
         self.follow_caret = true;
+        self.navigation = None;
     }
     fn options(scale: f32) -> RasterOptions {
         RasterOptions {
@@ -76,6 +79,8 @@ impl TextDemo {
                 .raster
                 .paragraph(&display, FAMILIES, Self::options(scale))?;
             self.uploaded = false;
+            self.navigation = None;
+            self.drag = None;
         }
         Ok(())
     }
@@ -99,8 +104,12 @@ impl TextDemo {
                 Self::options(self.paragraph.bitmap().scale),
             )?;
             self.uploaded = false;
+            self.drag = None;
         }
         self.input = next;
+        if follow_caret {
+            self.navigation = None;
+        }
         self.follow_caret |= follow_caret;
         Ok(result)
     }
@@ -133,19 +142,33 @@ impl TextDemo {
         synthetic: bool,
         mut result: KeyResult,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
-        // End at the document end (or Backspace at its start) still needs to
-        // reveal an offscreen caret after manual scrolling, without a text edit.
-        let navigation = matches!(
-            key,
-            Key::Named(
-                NamedKey::Home
-                    | NamedKey::End
-                    | NamedKey::ArrowLeft
-                    | NamedKey::ArrowRight
-                    | NamedKey::Backspace
-                    | NamedKey::Delete
-            )
-        );
+        if let Some(movement) = result.navigation {
+            let current = self
+                .current_navigation()
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    self.paragraph
+                        .layout_selection(self.input.buffer.selection())
+                })?;
+            let next = self.paragraph.move_selection(
+                &current,
+                movement,
+                self.input.modifiers.shift_key(),
+            )?;
+            result.changed |= !next.same_position(&current);
+            self.input.buffer.set_selection(next.selection())?;
+            self.navigation = Some(next);
+            self.follow_caret = true;
+            let before = (self.scroll_x, self.scroll_y);
+            self.update_view()?;
+            result.changed |= before != (self.scroll_x, self.scroll_y);
+            self.end_drag();
+            return Ok(result);
+        }
+        // A no-op deletion still reveals an offscreen caret after manual
+        // scrolling. Layout navigation (including no-ops) is handled above.
+        let navigation = matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete));
         let blocked = self.input.modifiers.super_key()
             || (self.input.modifiers.control_key() && !self.input.modifiers.alt_key());
         if !result.changed
@@ -189,7 +212,11 @@ impl TextDemo {
         self.input.modifiers = modifiers;
     }
     pub fn cancel_composition(&mut self) {
-        self.follow_caret |= self.input.cancel_composition();
+        let changed = self.input.cancel_composition();
+        self.follow_caret |= changed;
+        if changed {
+            self.navigation = None;
+        }
         self.end_drag();
     }
     pub fn begin_drag(
@@ -204,57 +231,68 @@ impl TextDemo {
         self.input.focus(true);
         self.refresh(self.paragraph.bitmap().scale)?;
         self.clamp_scroll();
-        let offset = self.pointer_offset(point)?;
-        self.input.buffer.set_selection(Selection::new(
-            if extend {
-                self.input.buffer.selection().anchor
-            } else {
-                offset
-            },
-            offset,
-        ))?;
+        let anchor = if extend {
+            Some(
+                self.current_navigation()
+                    .cloned()
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        self.paragraph
+                            .layout_selection(self.input.buffer.selection())
+                    })?,
+            )
+        } else {
+            None
+        };
+        let selection = self.pointer_selection(point, anchor.as_ref())?;
+        self.input.buffer.set_selection(selection.selection())?;
+        self.navigation = Some(selection.clone());
         self.drag = Some(Drag {
-            anchor: self.input.buffer.selection().anchor,
+            anchor: selection,
             pointer: point,
         });
         self.follow_caret = false;
         Ok(())
     }
-    fn pointer_offset(
+    fn pointer_selection(
         &self,
         point: Point<Logical>,
-    ) -> Result<usize, zest::text::raster::RasterError> {
+        anchor: Option<&LayoutSelection>,
+    ) -> Result<LayoutSelection, zest::text::raster::RasterError> {
         if !point.x.is_finite() || !point.y.is_finite() {
             return Err(zest::text::raster::RasterError::InvalidOptions);
         }
-        self.paragraph.hit_test(
-            point
-                .x
-                .clamp(VIEW.origin.x, VIEW.origin.x + VIEW_WIDTH - 0.5)
-                - VIEW.origin.x
-                + self.scroll_x,
-            point
-                .y
-                .clamp(VIEW.origin.y, VIEW.origin.y + VIEW_HEIGHT - 0.5)
-                - VIEW.origin.y
-                + self.scroll_y,
-        )
+        let x = point
+            .x
+            .clamp(VIEW.origin.x, VIEW.origin.x + VIEW_WIDTH - 0.5)
+            - VIEW.origin.x
+            + self.scroll_x;
+        let y = point
+            .y
+            .clamp(VIEW.origin.y, VIEW.origin.y + VIEW_HEIGHT - 0.5)
+            - VIEW.origin.y
+            + self.scroll_y;
+        match anchor {
+            Some(anchor) => self.paragraph.extend_selection(anchor, x, y),
+            None => self.paragraph.selection_at(x, y),
+        }
     }
     pub fn drag_to(&mut self, point: Point<Logical>) -> Result<bool, Box<dyn std::error::Error>> {
-        let Some(drag) = self.drag else {
+        let Some(drag) = self.drag.clone() else {
             return Ok(false);
         };
-        let offset = self.pointer_offset(point)?;
-        let changed = self
-            .input
-            .buffer
-            .set_selection(Selection::new(drag.anchor, offset))?;
+        let selection = self.pointer_selection(point, Some(&drag.anchor))?;
+        let visual_changed = self
+            .current_navigation()
+            .is_none_or(|old| !old.same_position(&selection));
+        let changed = self.input.buffer.set_selection(selection.selection())?;
+        self.navigation = Some(selection);
         self.drag = Some(Drag {
             pointer: point,
             ..drag
         });
         self.follow_caret = false;
-        Ok(changed)
+        Ok(changed || visual_changed)
     }
     pub fn end_drag(&mut self) {
         self.drag = None;
@@ -301,7 +339,7 @@ impl TextDemo {
         }
         self.follow_caret = false;
         let scrolled = self.scroll_by(-x, -y);
-        let selected = if let Some(drag) = self.drag {
+        let selected = if let Some(drag) = self.drag.clone() {
             self.drag_to(drag.pointer)?
         } else {
             false
@@ -309,7 +347,7 @@ impl TextDemo {
         Ok(scrolled || selected)
     }
     fn drag_velocity(&self) -> (f64, f64) {
-        let Some(drag) = self.drag else {
+        let Some(drag) = &self.drag else {
             return (0.0, 0.0);
         };
         let axis = |point: f64, start: f64, end: f64| {
@@ -347,12 +385,33 @@ impl TextDemo {
         }
         let (x, y) = self.drag_velocity();
         let scrolled = self.scroll_by(x * seconds.min(0.1), y * seconds.min(0.1));
-        let selected = if let Some(drag) = self.drag {
+        let selected = if let Some(drag) = self.drag.clone() {
             self.drag_to(drag.pointer)?
         } else {
             false
         };
         Ok(scrolled || selected)
+    }
+    fn current_navigation(&self) -> Option<&LayoutSelection> {
+        self.navigation.as_ref().filter(|state| {
+            self.input.buffer.preedit().is_none()
+                && state.selection() == self.input.buffer.selection()
+        })
+    }
+    fn current_caret(&self) -> Result<TextRect, zest::text::raster::RasterError> {
+        match self.current_navigation() {
+            Some(state) => self.paragraph.selection_caret(state),
+            None => self.paragraph.caret(self.display_head()),
+        }
+    }
+    fn selection_rects(
+        &self,
+        selection: Selection,
+    ) -> Result<Vec<TextRect>, zest::text::raster::RasterError> {
+        match self.current_navigation() {
+            Some(state) => self.paragraph.selection_geometry(state),
+            None => self.paragraph.selection_rects(selection),
+        }
     }
     fn display_head(&self) -> usize {
         self.input
@@ -369,7 +428,7 @@ impl TextDemo {
     fn update_view(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.clamp_scroll();
         if std::mem::take(&mut self.follow_caret) {
-            let caret = self.paragraph.caret(self.display_head())?;
+            let caret = self.current_caret()?;
             if caret.x < self.scroll_x {
                 self.scroll_x = caret.x;
             }
@@ -411,7 +470,7 @@ impl TextDemo {
         )
     }
     pub fn ime_area(&self) -> Option<Rect<Logical>> {
-        let caret = self.paragraph.caret(self.display_head()).ok()?;
+        let caret = self.current_caret().ok()?;
         let rect = self.rect(caret);
         let height = rect.size.height.clamp(1.0, VIEW_HEIGHT);
         Some(Rect::from_xywh(
@@ -453,7 +512,6 @@ impl TextDemo {
                     && let Some(selection) = self.input.buffer.display_selection()
                 {
                     for rect in self
-                        .paragraph
                         .selection_rects(selection)
                         .expect("validated display selection")
                     {
@@ -490,11 +548,7 @@ impl TextDemo {
                     && selection.is_caret()
                 {
                     p.quad(Quad {
-                        bounds: self.rect(
-                            self.paragraph
-                                .caret(selection.head)
-                                .expect("validated display caret"),
-                        ),
+                        bounds: self.rect(self.current_caret().expect("validated display caret")),
                         color: [1.0; 4],
                     })?;
                 }
@@ -763,13 +817,85 @@ pub(super) fn check_editor(renderer: &mut Renderer) -> Result<(), Box<dyn std::e
     {
         return Err("wheel/drag changed model history, uploaded text again or lost fractional-DPI scrolling".into());
     }
+    editor.edit(|input| {
+        input.buffer.select_all()?;
+        input.buffer.insert("abcdefghij\nx\nabcdefghij")?;
+        input.buffer.set_selection(Selection::caret(8))
+    })?;
+    editor.prepare(renderer, 1.25)?;
+    let image = editor.image;
+    let staged = renderer.upload_stats().staged_bytes;
+    let history = editor.input.buffer.history_stats();
+    editor.key(&Key::Named(NamedKey::ArrowDown), None, true, false)?;
+    editor.key(&Key::Named(NamedKey::ArrowDown), None, true, false)?;
+    if editor.input.buffer.selection().head != 21 {
+        return Err("vertical navigation lost its goal column".into());
+    }
+    editor.prepare(renderer, 1.25)?;
+    let capture = capture_editor(&editor, renderer)?;
+    let caret = editor.rect(editor.current_caret()?);
+    expect_pixel(
+        &capture,
+        (caret.origin.x * 1.25 - 0.5).ceil() as u32,
+        ((caret.origin.y + caret.size.height * 0.5) * 1.25).floor() as u32,
+        [255; 4],
+    )?;
+    editor.modifiers(ModifiersState::SHIFT);
+    editor.key(&Key::Named(NamedKey::ArrowUp), None, true, false)?;
+    editor.key(&Key::Named(NamedKey::ArrowUp), None, true, false)?;
+    editor.prepare(renderer, 1.25)?;
+    capture_editor(&editor, renderer)?;
+    if editor.input.buffer.selection() != Selection::new(21, 8)
+        || editor.input.buffer.history_stats() != history
+        || editor.image != image
+        || renderer.upload_stats().staged_bytes != staged
+    {
+        return Err("vertical selection changed history or uploaded a new text image".into());
+    }
+    editor.modifiers(ModifiersState::empty());
+    editor.edit(|input| {
+        input.buffer.select_all()?;
+        input.buffer.insert(&"one two three four five ".repeat(4))?;
+        input.buffer.set_selection(Selection::caret(0))
+    })?;
+    editor.prepare(renderer, 1.25)?;
+    let image = editor.image;
+    let staged = renderer.upload_stats().staged_bytes;
+    editor.key(&Key::Named(NamedKey::End), None, true, false)?;
+    let offset = editor.input.buffer.selection().head;
+    let line_y = editor.current_caret()?.y;
+    let moved = editor.key(&Key::Named(NamedKey::ArrowRight), None, true, false)?;
+    if !moved.changed
+        || editor.input.buffer.selection().head != offset
+        || editor.current_caret()?.y <= line_y
+    {
+        return Err("wrap-affinity transition did not move the visible caret".into());
+    }
+    editor.key(&Key::Named(NamedKey::ArrowLeft), None, true, false)?;
+    editor.prepare(renderer, 1.25)?;
+    let capture = capture_editor(&editor, renderer)?;
+    let caret = editor.rect(editor.current_caret()?);
+    expect_pixel(
+        &capture,
+        (caret.origin.x * 1.25 - 0.5).ceil() as u32,
+        ((caret.origin.y + caret.size.height * 0.5) * 1.25).floor() as u32,
+        [255; 4],
+    )?;
+    if editor.current_caret()?.y != line_y
+        || editor.image != image
+        || renderer.upload_stats().staged_bytes != staged
+    {
+        return Err(
+            "affinity-only movement rebuilt the bitmap or used the wrong visual line".into(),
+        );
+    }
     renderer.remove_image(editor.image.unwrap())?;
     renderer.wait_idle()?;
     if renderer.image_stats().live != live || renderer.image_stats().retired != 0 {
         return Err("editor image replacement leaked textures".into());
     }
     println!(
-        "GPU editor checks passed: selection/caret/preedit pixels, drag/wheel at fractional DPI without texture uploads, IME commit/undo, caret/drag scrolling, focus cancellation and texture retirement"
+        "GPU editor checks passed: selection/caret/preedit pixels, drag/wheel/visual navigation without texture uploads, vertical goal column, wrap affinity, IME undo, scrolling and texture retirement"
     );
     Ok(())
 }

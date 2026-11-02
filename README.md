@@ -45,10 +45,14 @@ left quad's color on hover. Resize and DPI events update surface/geometry. Norma
 operation uses an event-driven `Wait` loop. A timer runs only while an active
 text drag can scroll beyond a viewport edge; other idle states request no frames.
 Click the text field to edit, or outside it to release text focus. Use Shift with
-Left/Right for selection, Home/End for document start/end, Enter for a newline,
+arrows for selection, Home/End for displayed-line start/end, Enter for a newline,
 Backspace/Delete for grapheme deletion, Ctrl/Cmd+A to select all, Ctrl/Cmd+Z to
-undo, and Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Arrows follow logical string
-order; visual bidi arrows and Up/Down navigation are still pending. Click places
+undo, and Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Ctrl/Cmd+Home/End move to document
+start/end. Left/Right follow visual order in LTR/RTL runs; Up/Down preserve the
+desired horizontal position through short or wrapped lines. Home/End use logical
+text start/end within the displayed line. On macOS, Cmd+Left/Right also use line
+boundaries and Cmd+Up/Down use document boundaries. Word and page navigation are
+still pending. Click places
 the caret using layout hit testing; Shift+click extends selection. Hold the left
 button and drag to extend from a fixed anchor, including across graphemes and
 wrapped/RTL runs. Dragging beyond the text viewport scrolls toward that edge
@@ -135,6 +139,10 @@ time for stationary-edge autoscroll, limit its step after a stall, and verify it
 stops at document boundaries or capture cancellation. Native IME candidate
 windows and actual keyboard layouts still require manual platform testing;
 event replay does not establish their behavior.
+Navigation checks cover vertical goal columns, visual movement in mixed bidi
+text, Shift extension, ligature/grapheme boundaries, empty documents and soft-wrap
+affinity. GPU checks verify the caret moves between visual lines even when its
+byte offset is unchanged and navigation reuses the same bitmap/image.
 
 `Renderer::capture` and `capture_list` provide synchronous packed sRGB RGBA8 readback for tests and
 screenshots. Ordinary rendering never reads back pixels. Smoke fails on renderer
@@ -266,8 +274,8 @@ Document selections must lie on extended grapheme boundaries. Movement and
 deletion use [unicode-segmentation](https://docs.rs/unicode-segmentation/1.13.3/unicode_segmentation/)
 to keep combining marks, emoji sequences and CRLF together. New carets snap
 forward to a grapheme boundary after an edit merges adjacent clusters. Movement
-is in logical string order; visual bidi arrows and line navigation remain future
-work. Optional paragraph snapshots provide layout hit testing. Text and line
+is in logical string order. The optional paragraph layer provides visual bidi
+movement, line navigation and layout hit testing for interactive editors. Text and line
 endings are preserved verbatim.
 
 Preedit replaces the selected range only in `display_text()`. Its cursor is
@@ -352,8 +360,20 @@ only, without color emoji or rich text decorations.
 layout plus its bitmap. `caret`, `selection_rects` and `hit_test` use logical
 coordinates relative to the paragraph origin. UTF-8 offsets are validated;
 scalar offsets inside a shaped cluster resolve to cluster geometry. Hit testing
-snaps forward to a grapheme boundary accepted by `TextBuffer`. Bidi and soft-wrap
-affinity is canonicalized, so this is not yet a complete visual navigation API.
+snaps forward to a grapheme boundary accepted by `TextBuffer`. These byte-only
+methods canonicalize bidi/soft-wrap affinity. Interactive editing uses
+`Paragraph::layout_selection` or `selection_at` to create a `LayoutSelection`,
+then `move_selection` with `Navigation` and an extension flag. The state retains
+both endpoint affinities and the horizontal goal for repeated Up/Down moves.
+`selection_caret` and `selection_geometry` use that retained visual state;
+`extend_selection` preserves the pointer anchor's affinity. `selection()` gives
+grapheme-aligned model byte offsets. `same_position()` compares visual endpoints,
+not the saved vertical goal column.
+
+Layout selections belong to one immutable snapshot. Using them with another
+paragraph returns `ForeignSelection`; rebuild them from model offsets after text,
+font, wrapping width or DPI changes. The demo clears cached navigation on a layout
+rebuild or model edit, and blocks navigation while IME preedit is active.
 The demo projects the editing model's display selection into these snapshots,
 paints selection behind text and preedit underlines/caret above it, and clips
 everything to the field viewport. Selection-only changes reuse the same bitmap

@@ -3,13 +3,14 @@ use winit::{
     event::Ime,
     keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
 };
-use zest::text::{EditError, Movement, Selection, TextBuffer};
+use zest::text::{EditError, Selection, TextBuffer, raster::Navigation};
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(super) struct KeyResult {
     pub changed: bool,
     pub close: bool,
     pub reset_ime: bool,
+    pub navigation: Option<Navigation>,
 }
 
 #[derive(Clone)]
@@ -118,6 +119,55 @@ impl TextInput {
             self.modifiers.control_key()
         };
         let shortcut = primary && !self.modifiers.alt_key();
+        if !self.modifiers.alt_key() && (!self.modifiers.super_key() || cfg!(target_os = "macos")) {
+            result.navigation = match key {
+                Key::Named(NamedKey::Home) => Some(if primary {
+                    Navigation::DocumentStart
+                } else {
+                    Navigation::LineStart
+                }),
+                Key::Named(NamedKey::End) => Some(if primary {
+                    Navigation::DocumentEnd
+                } else {
+                    Navigation::LineEnd
+                }),
+                Key::Named(NamedKey::ArrowLeft) if !primary => Some(Navigation::Left),
+                Key::Named(NamedKey::ArrowRight) if !primary => Some(Navigation::Right),
+                Key::Named(NamedKey::ArrowUp) if !primary => Some(Navigation::Up),
+                Key::Named(NamedKey::ArrowDown) if !primary => Some(Navigation::Down),
+                Key::Named(NamedKey::ArrowLeft) if cfg!(target_os = "macos") => {
+                    Some(Navigation::LineStart)
+                }
+                Key::Named(NamedKey::ArrowRight) if cfg!(target_os = "macos") => {
+                    Some(Navigation::LineEnd)
+                }
+                Key::Named(NamedKey::ArrowUp) if cfg!(target_os = "macos") => {
+                    Some(Navigation::DocumentStart)
+                }
+                Key::Named(NamedKey::ArrowDown) if cfg!(target_os = "macos") => {
+                    Some(Navigation::DocumentEnd)
+                }
+                _ => None,
+            };
+            if result.navigation.is_some() {
+                return Ok(result);
+            }
+        }
+        // Unsupported navigation modifiers are consumed too: function-key text
+        // payloads must never fall through to ordinary text insertion.
+        if matches!(
+            key,
+            Key::Named(
+                NamedKey::Home
+                    | NamedKey::End
+                    | NamedKey::ArrowLeft
+                    | NamedKey::ArrowRight
+                    | NamedKey::ArrowUp
+                    | NamedKey::ArrowDown
+            )
+        ) {
+            return Ok(result);
+        }
         if shortcut {
             result.changed = match key.as_ref() {
                 Key::Character(c) if c.eq_ignore_ascii_case("a") => self.buffer.select_all()?,
@@ -142,18 +192,6 @@ impl TextInput {
         result.changed = match key {
             Key::Named(NamedKey::Backspace) => self.buffer.backspace()?,
             Key::Named(NamedKey::Delete) => self.buffer.delete_forward()?,
-            Key::Named(NamedKey::ArrowLeft) => self
-                .buffer
-                .move_cursor(Movement::PreviousGrapheme, self.modifiers.shift_key())?,
-            Key::Named(NamedKey::ArrowRight) => self
-                .buffer
-                .move_cursor(Movement::NextGrapheme, self.modifiers.shift_key())?,
-            Key::Named(NamedKey::Home) => self
-                .buffer
-                .move_cursor(Movement::DocumentStart, self.modifiers.shift_key())?,
-            Key::Named(NamedKey::End) => self
-                .buffer
-                .move_cursor(Movement::DocumentEnd, self.modifiers.shift_key())?,
             Key::Named(NamedKey::Enter) => self.buffer.insert("\n")?,
             _ => {
                 match text.filter(|text| !text.is_empty() && !text.chars().any(char::is_control)) {

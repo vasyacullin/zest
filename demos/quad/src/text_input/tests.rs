@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn layout_navigation_requests_preserve_text_and_handle_document_shortcuts() {
+    let mut input = TextInput::new("one\ntwo");
+    input.focus(true);
+    for (key, movement) in [
+        (NamedKey::Home, Navigation::LineStart),
+        (NamedKey::End, Navigation::LineEnd),
+        (NamedKey::ArrowUp, Navigation::Up),
+        (NamedKey::ArrowDown, Navigation::Down),
+    ] {
+        let result = input
+            .key(&named(key), Some("incidental"), true, false)
+            .unwrap();
+        assert_eq!(result.navigation, Some(movement));
+        assert!(!result.changed);
+    }
+    input.modifiers = command_modifier() | ModifiersState::SHIFT;
+    assert_eq!(
+        input
+            .key(&named(NamedKey::Home), None, true, false)
+            .unwrap()
+            .navigation,
+        Some(Navigation::DocumentStart)
+    );
+    assert_eq!(
+        input
+            .key(&named(NamedKey::End), None, true, false)
+            .unwrap()
+            .navigation,
+        Some(Navigation::DocumentEnd)
+    );
+    input.modifiers = ModifiersState::ALT;
+    assert_eq!(
+        input
+            .key(&named(NamedKey::ArrowUp), Some("incidental"), true, false)
+            .unwrap(),
+        KeyResult::default()
+    );
+    assert_eq!(input.buffer.text(), "one\ntwo");
+    assert_eq!(input.buffer.history_stats().undo_edits, 0);
+}
+
+#[test]
 fn command_shortcuts_follow_physical_positions_on_cyrillic_layouts() {
     let mut input = TextInput::new("base");
     input.focus(true);
@@ -100,10 +142,11 @@ fn typing_shortcuts_graphemes_and_synthetic_events_use_the_real_binding() {
     input.key(&character("z"), None, true, false).unwrap();
     assert_eq!(input.buffer.text(), "Ж");
     input.modifiers = ModifiersState::SHIFT;
-    input
+    let movement = input
         .key(&named(NamedKey::ArrowLeft), None, true, false)
         .unwrap();
-    assert_eq!(input.buffer.selected_text(), "Ж");
+    assert_eq!(movement.navigation, Some(Navigation::Left));
+    assert!(input.buffer.selection().is_caret()); // the layout owner applies navigation
 }
 
 #[test]

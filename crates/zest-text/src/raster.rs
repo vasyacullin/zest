@@ -6,7 +6,9 @@ use parley::{
     LayoutContext, PositionedLayoutItem, StyleProperty,
     fontique::{Collection, CollectionOptions},
 };
-use std::{collections::HashSet, fmt};
+use std::{collections::HashSet, fmt, sync::Arc};
+mod navigation;
+pub use navigation::{LayoutSelection, Navigation};
 use swash::{
     FontRef,
     scale::{Render, ScaleContext, Source, image::Content},
@@ -28,6 +30,8 @@ pub enum RasterError {
     LayoutTooLarge,
     InvalidRaster,
     InvalidOffset(usize),
+    InvalidGraphemeOffset(usize),
+    ForeignSelection,
 }
 impl fmt::Display for RasterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -49,6 +53,12 @@ impl fmt::Display for RasterError {
             }
             Self::InvalidOffset(offset) => {
                 write!(f, "invalid paragraph UTF-8 byte offset: {offset}")
+            }
+            Self::InvalidGraphemeOffset(offset) => {
+                write!(f, "not a paragraph grapheme boundary: {offset}")
+            }
+            Self::ForeignSelection => {
+                f.write_str("selection belongs to a different paragraph snapshot")
             }
         }
     }
@@ -132,6 +142,7 @@ pub struct TextRect {
 /// the same shaped layout as the bitmap, including wrapping and bidi ordering.
 /// Scalar offsets inside a cluster resolve to that cluster's caret geometry.
 pub struct Paragraph {
+    identity: Arc<()>,
     bitmap: RasterizedText,
     layout: Layout<()>,
     text: String,
@@ -447,6 +458,7 @@ impl Rasterizer {
             metrics,
         };
         Ok(Paragraph {
+            identity: Arc::new(()),
             bitmap,
             layout,
             text: text.to_owned(),

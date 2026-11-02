@@ -22,6 +22,109 @@ fn at(editor: &TextDemo, offset: usize) -> Point<Logical> {
 }
 
 #[test]
+fn vertical_navigation_keeps_goal_column_and_shift_anchor_without_editing_history() {
+    let mut editor = editor("abcdefghij\nx\nabcdefghij");
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(8)))
+        .unwrap();
+    let history = editor.input.buffer.history_stats();
+    let snapshot_guard = editor
+        .paragraph
+        .layout_selection(Selection::caret(8))
+        .unwrap();
+    editor
+        .key(&Key::Named(NamedKey::ArrowDown), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection().head, 12);
+    editor
+        .key(&Key::Named(NamedKey::ArrowDown), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection().head, 21);
+    editor.modifiers(ModifiersState::SHIFT);
+    editor
+        .key(&Key::Named(NamedKey::ArrowUp), None, true, false)
+        .unwrap();
+    editor
+        .key(&Key::Named(NamedKey::ArrowUp), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(21, 8));
+    assert_eq!(editor.input.buffer.history_stats(), history);
+    assert!(editor.paragraph.selection_caret(&snapshot_guard).is_ok());
+}
+
+#[test]
+fn wrap_affinity_survives_render_geometry_hit_testing_and_affinity_only_keys() {
+    let mut editor = editor(&"one two three four five ".repeat(4));
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(0)))
+        .unwrap();
+    editor
+        .key(&Key::Named(NamedKey::End), None, true, false)
+        .unwrap();
+    let head = editor.input.buffer.selection().head;
+    let end = editor.current_caret().unwrap();
+    assert_eq!(end.y, 0.0);
+    assert!(
+        editor
+            .key(&Key::Named(NamedKey::ArrowRight), None, true, false)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(editor.input.buffer.selection().head, head);
+    assert!(editor.current_caret().unwrap().y > end.y);
+    assert!(
+        editor
+            .key(&Key::Named(NamedKey::ArrowLeft), None, true, false)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(editor.input.buffer.selection().head, head);
+    assert_eq!(editor.current_caret().unwrap().y, end.y);
+    let rect = editor.rect(editor.current_caret().unwrap());
+    editor
+        .begin_drag(
+            Point::new(rect.origin.x + 0.1, rect.origin.y + rect.size.height * 0.5),
+            false,
+        )
+        .unwrap();
+    editor.end_drag();
+    assert_eq!(editor.input.buffer.selection().head, head);
+    assert_eq!(editor.current_caret().unwrap().y, end.y);
+}
+
+#[test]
+fn rebuild_invalidates_layout_navigation_and_cancels_drag() {
+    let mut editor = editor("one\ntwo\nthree");
+    editor
+        .key(&Key::Named(NamedKey::ArrowUp), None, true, false)
+        .unwrap();
+    let old = editor.current_navigation().unwrap().clone();
+    editor.begin_drag(Point::new(310.0, 300.0), false).unwrap();
+    editor.refresh(1.5).unwrap();
+    assert!(editor.navigation.is_none());
+    assert!(!editor.dragging());
+    assert_eq!(
+        editor.paragraph.selection_caret(&old),
+        Err(zest::text::raster::RasterError::ForeignSelection)
+    );
+    editor
+        .key(&Key::Named(NamedKey::ArrowDown), None, true, false)
+        .unwrap();
+    assert!(editor.current_caret().unwrap().height > 0.0);
+    editor.ime(&Ime::Enabled).unwrap();
+    editor.ime(&Ime::Preedit("é".into(), Some((2, 2)))).unwrap();
+    let display = editor.input.buffer.display_text().into_owned();
+    assert!(editor.current_navigation().is_none());
+    assert!(
+        !editor
+            .key(&Key::Named(NamedKey::ArrowUp), None, true, false)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(editor.input.buffer.display_text(), display);
+}
+
+#[test]
 fn paragraph_rejection_preserves_document_selection_history_and_snapshot() {
     let mut editor = TextDemo::new().unwrap();
     editor.focus(true);
@@ -225,6 +328,11 @@ fn pointer_drag_selects_rtl_and_soft_wrapped_runs_and_the_rtl_start_caret_is_rea
         assert_eq!(editor.input.buffer.selected_text(), sample);
         assert_eq!(editor.input.buffer.selection().anchor, 0);
         editor.end_drag();
+        editor.modifiers(if cfg!(target_os = "macos") {
+            ModifiersState::SUPER
+        } else {
+            ModifiersState::CONTROL
+        });
         editor
             .key(
                 &Key::Named(winit::keyboard::NamedKey::Home),
@@ -233,6 +341,7 @@ fn pointer_drag_selects_rtl_and_soft_wrapped_runs_and_the_rtl_start_caret_is_rea
                 false,
             )
             .unwrap();
+        editor.modifiers(ModifiersState::empty());
         editor.update_view().unwrap();
         let caret = editor.rect(editor.paragraph.caret(0).unwrap());
         assert!(caret.origin.x >= VIEW.origin.x);
