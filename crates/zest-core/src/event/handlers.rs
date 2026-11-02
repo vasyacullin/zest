@@ -1,4 +1,5 @@
 use super::{DispatchResult, EventContext, EventControl, EventPhase};
+use crate::semantics::SemanticTarget;
 use crate::{Scene, WidgetId};
 use bevy_ecs::{entity::Entity, world::WorldId};
 use std::collections::HashMap;
@@ -129,6 +130,21 @@ impl<E, S> EventHandlers<E, S> {
             }
             (handler.callback)(ctx, event, state)
         })
+    }
+
+    /// Route to an observed semantic instance. Stale/foreign bindings return None
+    /// without invoking handlers; current enabled/modal rules still apply.
+    pub fn dispatch_target(
+        &mut self,
+        scene: &Scene,
+        target: &SemanticTarget,
+        event: &mut E,
+        state: &mut S,
+    ) -> Option<DispatchResult> {
+        if !target.is_live(scene) {
+            return None;
+        }
+        self.dispatch(scene, target.id(), event, state)
     }
 
     /// Dispatch to the current focused node; no eligible focus yields None.

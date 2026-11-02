@@ -22,6 +22,8 @@ impl ActivationKey {
 pub enum ActivationSource {
     Pointer,
     Keyboard(ActivationKey),
+    /// Logical activation requested by semantic tooling, without a key/pointer pair.
+    Semantic,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

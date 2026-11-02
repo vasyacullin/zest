@@ -1,10 +1,12 @@
-//! Read-only semantic observations for inspection and headless UI queries.
-//! Platform accessibility bridges, custom roles and actions are separate.
+//! Semantic observations, queries and instance-bound focus/event targets.
+//! Platform accessibility bridges, custom roles and additional actions are separate.
 use crate::{Node, NodeKind, Scene, WidgetId};
 use bevy_ecs::{entity::Entity, world::WorldId};
 use std::{collections::HashMap, fmt, sync::Arc};
 mod diff;
 pub use diff::SemanticChanges;
+mod target;
+pub use target::SemanticTarget;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticRole {
@@ -144,6 +146,7 @@ impl fmt::Debug for SnapshotData {
 /// reconciliation. Private generation stamps support change comparison; returned
 /// IDs still identify paths, not action handles. Query a fresh snapshot before
 /// input/actions and validate current eligibility and geometry separately.
+/// Use SemanticTarget to bind an observed instance for focus/event operations.
 /// This is not an OS accessibility tree or an input/activation implementation.
 #[derive(Clone, Debug)]
 pub struct SemanticSnapshot(Arc<SnapshotData>);

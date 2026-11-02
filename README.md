@@ -525,8 +525,36 @@ can therefore require a semantic replacement while reusing identical layout/pain
 Consumers read old/new node data from their snapshots and choose update ordering;
 comparison itself does not publish platform updates or consume scene invalidation.
 
+`snapshot.target(id)` and `find_target(query)` create an opaque `SemanticTarget`
+bound to the observed scene/entity generation, including when obtained from an
+older snapshot. Unknown IDs return None; unique-query errors match `find`.
+Targets support Clone/Eq/Hash and expose only their path through `id()`.
+`is_live(&scene)` checks instance existence; `input_allowed(&scene)` also checks
+current enabled/modal eligibility. Reorder/rename/state changes retain the binding;
+deletion/recreation and foreign scenes reject it, even with identical published
+data. Query filters describe the original observation and are not rerun by actions.
+
+`target.focus(&mut scene)` follows current Scene focus rules and leaves focus
+unchanged on rejection. `target.dispatch_event(&scene, &mut event, handler)` uses
+the current capture/target/bubble route and controls; stale/ineligible bindings call
+no handlers and leave the payload unchanged. `EventHandlers::dispatch_target`
+provides the same instance guard for registered handlers. Routing still leaves
+default actions to the caller. `SceneCommands::focus_target(&scene, &target)`
+guards the observed instance when queueing and rechecks its generation/eligibility
+when applying. Disabled nodes can be queued before an enabling command takes effect.
+Bindings check scene membership/availability, while current geometry, visibility,
+window ownership and gesture cancellation remain application policy.
+
+The preview routes logical activation as `ActivationSource::Semantic`, with its
+usual visible-button/window-focus policy. It cancels a pending gesture while
+retaining held-input latches, focuses the target, then runs shared handlers,
+selection default and deferred effects. An invalid binding leaves existing gestures
+untouched; a later release cannot complete a cancelled gesture. F6 interception,
+modal boundaries and F7 deferred focus apply to this path too. This exercises the
+library contracts through controlled smoke tests without synthesizing mouse/key pairs.
+
 These initial snapshots copy the scene and queries scan their nodes. Roles are
-derived from the current basic widgets; custom roles, semantic actions and platform
+derived from the current basic widgets; custom roles, additional semantic actions and platform
 accessibility bridges remain future work. Query result IDs identify paths and
 require current eligibility checks when used for input or queued actions. Query fresh
 data and join with current layout/visibility before routing input or binding scene

@@ -102,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .test_id("action.one")
         .named("Run action one");
     assert_eq!(before.find(query)?.id, retained);
+    let target = before.find_target(query)?;
     assert!(before.node(&retained).unwrap().state.enabled);
     scene
         .dispatch_event(&retained, &mut (), |ctx, _| {
@@ -115,6 +116,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = commands.apply(&mut scene).unwrap();
     assert_eq!(stats.applied, 1);
     assert!(!scene.state(&retained).unwrap().enabled());
+    assert!(target.is_live(&scene));
+    assert!(!target.input_allowed(&scene) && !target.focus(&mut scene));
     let current = scene.semantic_snapshot();
     let changes = current.changes_since(&before);
     assert_eq!(changes.changed, std::slice::from_ref(&retained));

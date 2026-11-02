@@ -1,4 +1,5 @@
 //! Ordered scene intents for application after synchronous event dispatch.
+use crate::semantics::SemanticTarget;
 use crate::{Scene, WidgetId};
 use bevy_ecs::{entity::Entity, world::WorldId};
 
@@ -98,6 +99,11 @@ impl SceneCommands {
         };
         self.pending.push(Command::Focus(target));
         true
+    }
+    /// Queue focus for an observed semantic instance. Rejected/stale bindings
+    /// leave the queue unchanged. Current input eligibility is checked on apply.
+    pub fn focus_target(&mut self, scene: &Scene, target: &SemanticTarget) -> bool {
+        target.is_live(scene) && self.focus(scene, target.id())
     }
     pub fn clear_focus(&mut self) {
         self.pending.push(Command::ClearFocus);

@@ -7,7 +7,7 @@ use zest::{
     geometry::Size,
     input::{ActivationKey, ActivationSource, ActivationState, InputResult},
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, RevealPlan, Style, TextContent},
-    semantics::SemanticProperties,
+    semantics::{SemanticProperties, SemanticTarget},
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
 mod clip_checks;
@@ -27,6 +27,7 @@ mod scrollbar_checks;
 mod scrollbar_input;
 mod semantic_checks;
 mod semantic_diff_checks;
+mod semantic_target_checks;
 
 const CLIP_HEIGHT: f64 = 96.25;
 
@@ -612,35 +613,63 @@ impl LayoutDemo {
     fn apply_input(&mut self, result: InputResult) -> bool {
         let mut changed = result.changed;
         if let Some(action) = result.activated {
-            let mut source = action.source;
-            let mut effects = ActivationEffects {
-                intercept: self.intercept_activation,
-                focus_footer: self.focus_footer,
-                commands: SceneCommands::new(&self.scene),
+            changed |= self.route_activation(&action.widget, action.source, None);
+        }
+        changed
+    }
+    /// Logical activation for semantic tooling. Preview policy requires current
+    /// visible/input-eligible geometry and window focus. No mouse/key pair is
+    /// synthesized; pending gestures are cancelled before the shared route.
+    pub(super) fn semantic_activate(&mut self, target: &SemanticTarget) -> bool {
+        if !self.window_focused
+            || !target.input_allowed(&self.scene)
+            || !self.interactive(target.id())
+            || !self.visible(target.id())
+        {
+            return false;
+        }
+        let mut changed = self.clear_scrollbar_drag();
+        changed |= self.activation.cancel(&mut self.scene);
+        changed |= self.set_focus(Some(target.id().clone()));
+        changed |= self.route_activation(target.id(), ActivationSource::Semantic, Some(target));
+        changed |= self.refresh_input();
+        changed
+    }
+    fn route_activation(
+        &mut self,
+        widget: &WidgetId,
+        mut source: ActivationSource,
+        semantic: Option<&SemanticTarget>,
+    ) -> bool {
+        let mut effects = ActivationEffects {
+            intercept: self.intercept_activation,
+            focus_footer: self.focus_footer,
+            commands: SceneCommands::new(&self.scene),
+        };
+        let dispatch = if let Some(target) = semantic {
+            self.activation_handlers
+                .dispatch_target(&self.scene, target, &mut source, &mut effects)
+        } else {
+            self.activation_handlers
+                .dispatch(&self.scene, widget, &mut source, &mut effects)
+        };
+        let mut changed = false;
+        if dispatch.is_some_and(|result| !result.default_prevented) {
+            if let Some(old) = &self.selected {
+                self.scene.invalidate_paint(old);
+            }
+            self.scene.invalidate_paint(widget);
+            self.selected = if self.selected.as_ref() == Some(widget) {
+                None
+            } else {
+                Some(widget.clone())
             };
-            let dispatch = self.activation_handlers.dispatch(
-                &self.scene,
-                &action.widget,
-                &mut source,
-                &mut effects,
-            );
-            if dispatch.is_some_and(|result| !result.default_prevented) {
-                if let Some(old) = &self.selected {
-                    self.scene.invalidate_paint(old);
-                }
-                self.scene.invalidate_paint(&action.widget);
-                self.selected = if self.selected.as_ref() == Some(&action.widget) {
-                    None
-                } else {
-                    Some(action.widget)
-                };
-                changed = true;
-            }
-            let stats = effects.commands.apply(&mut self.scene).unwrap();
-            if stats.applied != 0 {
-                changed |= stats.changed;
-                changed |= self.refresh_input();
-            }
+            changed = true;
+        }
+        let stats = effects.commands.apply(&mut self.scene).unwrap();
+        if stats.applied != 0 {
+            changed |= stats.changed;
+            changed |= self.refresh_input();
         }
         changed
     }
@@ -1050,6 +1079,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     semantic_checks::check(&mut demo, renderer)?;
     metadata_checks::check(&mut demo, renderer)?;
     semantic_diff_checks::check(&mut demo, renderer)?;
+    semantic_target_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -1115,5 +1145,7 @@ mod paint_tests;
 mod scroll_tests;
 #[cfg(test)]
 mod scrollbar_tests;
+#[cfg(test)]
+mod semantic_target_tests;
 #[cfg(test)]
 mod tests;
