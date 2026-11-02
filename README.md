@@ -11,7 +11,7 @@ and interaction flags, plus typed coordinate spaces and DPI conversion.
 The separate GPU slice opens a window and renders ordered, clipped quad batches.
 An optional text model provides Unicode editing, transient IME composition and
 bounded undo/redo. Optional paragraph layout/rasterization renders Latin,
-Cyrillic and Arabic in the GPU demo. Scene widgets are not yet connected to
+Cyrillic and Arabic in the GPU demo. Scene widgets are not yet automatically connected to
 rendering. An optional retained Flexbox layer computes scene bounds and supplies
 immutable logical snapshots. The window demo binds the text
 model to keyboard/IME events and paints caret, selection and preedit geometry.
@@ -90,8 +90,17 @@ measurement calls, rather than total node visits.
 The headless `zest-layout-demo` checks reorder identity, focus/hover, fractional
 bounds, snapshot/cache reuse and explicit conversion of layout bounds into quads.
 The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout, scrolling,
-clipping, automatic scene paint extraction and layout-driven input remain future
+ancestor clipping, automatic scene paint extraction and general widget event routing remain future
 work; this is the first layout slice, not a complete widget system.
+
+`LayoutSnapshot::hit_test(point, |id| accepts(id))` finds the last accepted box in
+snapshot declaration order. Paint in that order to use the same layering. It
+clips hits to the viewport, uses logical coordinates with half-open rectangle
+edges, ignores empty boxes and rejects nonfinite/out-of-viewport points. The
+predicate lets the caller exclude containers, disabled or noninteractive nodes.
+Use freshly computed geometry before positional input; old snapshots remain
+immutable and cannot detect scene edits on their own. This initial path tests
+rectangular bounds and has no ancestor clip chains or transforms.
 
 Enable the facade's `layout-text` feature (or `zest-layout/text`) to connect
 shaped text to Flexbox leaves. Create `TextContent::new(raster.shape(text,
@@ -126,8 +135,20 @@ those images; width/content/DPI changes rebuild them and retire old textures.
 GPU restoration can reupload the retained CPU paragraph without reshaping.
 The preview clips to the viewport, limits the readable column width, omits text
 when its content width is below one physical pixel and handles empty viewports.
-It demonstrates layout/painting; pointer/IME editing remains in the default
-demo. Esc closes either mode. The raster bitmap budgets still apply.
+Hover highlights a label/marker, left-click focuses it and clicking blank space
+clears focus. Tab/Shift+Tab cycles visible interactive nodes in declaration order;
+unsupported modifiers, synthetic keys and key releases do not advance focus.
+Fully clipped or subpixel-sized targets are skipped. Geometry is refreshed before
+pointer input/Tab, and resize re-hits a stationary pointer. DPI changes discard
+stale pointer coordinates; focus remains on the keyed node while it is visible.
+Focus loss clears hover/focus/modifiers; keyed reorder retains focus and removal
+clears it. These changes update scene flags and paint without invalidating layout,
+paragraphs or text images. Repeated movement within one target requests no redraw.
+The preview currently demonstrates focus, without widget activation/capture or
+text editing; IME editing remains in the default demo. Esc closes either mode.
+The raster bitmap budgets still apply. Layout smoke uses controlled input replay
+for state/highlight pixels and ignores live pointer/Tab input for deterministic
+captures; native keyboard/window focus behavior still needs platform testing.
 
 ## Experimental GPU slice
 

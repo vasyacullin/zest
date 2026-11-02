@@ -1,6 +1,6 @@
 use zest::{
     Scene,
-    geometry::Size,
+    geometry::{Point, Size},
     layout::{Axis, Edges, LayoutTree, Length, Style},
 };
 
@@ -60,6 +60,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(scene.focused(), Some(&first));
     assert!(scene.state(&first).unwrap().hovered());
     assert_eq!(initial.snapshot.bounds(&first).unwrap().origin.x, 10.25);
+    let bounds = reordered.snapshot.bounds(&first).unwrap();
+    let point = Point::new(bounds.origin.x + 1.0, bounds.origin.y + 1.0);
+    let target = reordered
+        .snapshot
+        .hit_test(point, |id| id != &toolbar)
+        .unwrap()
+        .clone();
+    assert_eq!(target, first);
+    assert_eq!(
+        initial.snapshot.hit_test(point, |id| id != &toolbar),
+        Some(&second)
+    );
+    scene.focus(&target);
+    scene.set_hovered(&target, true);
+    assert_eq!(tree.sync(&scene, styles)?, Default::default());
+    assert!(
+        tree.compute(viewport)?
+            .snapshot
+            .same_snapshot(&reordered.snapshot)
+    );
     let list = zest::paint::DisplayList::build(|painter| {
         for node in reordered
             .snapshot
@@ -77,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(list.len(), 2);
     println!("Reordered retained nodes: {sync:?}; {:?}", reordered.stats);
     println!(
-        "Layout smoke passed: fractional logical bounds, keyed reorder, focus/hover, cache reuse, immutable snapshots and display-list geometry."
+        "Layout smoke passed: fractional logical bounds, keyed reorder, current-snapshot hit testing, focus/hover, cache reuse, immutable snapshots and display-list geometry."
     );
     Ok(())
 }

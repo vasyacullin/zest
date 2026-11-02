@@ -20,6 +20,7 @@
 //! assert!(!cached.stats.performed);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+mod hit_test;
 mod style;
 #[cfg(feature = "text")]
 mod text;

@@ -447,10 +447,13 @@ impl ApplicationHandler for App {
                 );
             } else {
                 println!(
-                    "Layout preview: resize the window to reflow the text; Esc closes. Pointer/IME editing is available in the default demo."
+                    "Layout preview: hover/click to select a node; Tab/Shift+Tab changes focus. Resize reflows text; Esc closes. Text/IME editing is available in the default demo."
                 );
             }
             self.text.focus(self.layout.is_none() && window.has_focus());
+            if let Some(layout) = &mut self.layout {
+                layout.focus_window(window.has_focus());
+            }
             window.set_ime_allowed(self.text.input.focused);
             window.request_redraw();
             self.window = Some(window);
@@ -467,6 +470,7 @@ impl ApplicationHandler for App {
         self.text.reset();
         if let Some(layout) = &mut self.layout {
             layout.reset_gpu();
+            layout.focus_window(false);
         }
         self.cursor = None;
         self.drag_tick = None;
@@ -482,7 +486,37 @@ impl ApplicationHandler for App {
         if window.id() != id {
             return;
         }
-        if self.layout.is_some() {
+        if let Some(layout) = &mut self.layout {
+            let mut changed = false;
+            // Geometry may have changed before its resize/DPI redraw arrives.
+            if !self.smoke
+                && matches!(
+                    &event,
+                    WindowEvent::CursorMoved { .. }
+                        | WindowEvent::MouseInput {
+                            state: ElementState::Pressed,
+                            button: MouseButton::Left,
+                            ..
+                        }
+                        | WindowEvent::KeyboardInput { .. }
+                )
+            {
+                let size = window.inner_size();
+                let scale = window.scale_factor();
+                match layout.update_geometry(
+                    zest::geometry::Size::new(
+                        f64::from(size.width) / scale,
+                        f64::from(size.height) / scale,
+                    ),
+                    scale as f32,
+                ) {
+                    Ok(updated) => changed |= updated,
+                    Err(error) => {
+                        self.fail(events, error);
+                        return;
+                    }
+                }
+            }
             match &event {
                 WindowEvent::KeyboardInput {
                     event,
@@ -496,18 +530,62 @@ impl ApplicationHandler for App {
                     {
                         events.exit();
                     }
+                    if !self.smoke {
+                        changed |= layout.key(
+                            &event.logical_key,
+                            event.state == ElementState::Pressed,
+                            *is_synthetic,
+                        );
+                    }
+                    if changed {
+                        window.request_redraw();
+                    }
                     return;
                 }
-                WindowEvent::Focused(_) => {
+                WindowEvent::Focused(focused) => {
+                    if layout.focus_window(*focused) {
+                        window.request_redraw();
+                    }
                     window.set_ime_allowed(false);
                     return;
                 }
-                WindowEvent::Ime(_)
-                | WindowEvent::ModifiersChanged(_)
-                | WindowEvent::MouseInput { .. }
-                | WindowEvent::MouseWheel { .. }
-                | WindowEvent::CursorMoved { .. }
-                | WindowEvent::CursorLeft { .. } => return,
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    layout.modifiers(modifiers.state());
+                    return;
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    if !self.smoke {
+                        changed |= layout.pointer_moved(
+                            Point::new(position.x, position.y).to_logical(
+                                ScaleFactor::new(window.scale_factor())
+                                    .expect("positive window DPI"),
+                            ),
+                        );
+                    }
+                    if changed {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    if !self.smoke
+                        && *state == ElementState::Pressed
+                        && *button == MouseButton::Left
+                    {
+                        changed |= layout.pointer_press();
+                    }
+                    if changed {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    if layout.pointer_left() {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                WindowEvent::Ime(_) | WindowEvent::MouseWheel { .. } => return,
                 _ => {}
             }
         }
@@ -639,6 +717,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(layout) = &mut self.layout {
+                    layout.pointer_left();
+                }
                 self.cursor = None;
                 self.text.cancel_pointer();
                 self.drag_tick = None;
@@ -672,6 +753,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Occluded(false) => window.request_redraw(),
             WindowEvent::Occluded(true) => {
+                if let Some(layout) = &mut self.layout {
+                    layout.pointer_left();
+                }
                 self.text.cancel_pointer();
                 self.drag_tick = None;
             }

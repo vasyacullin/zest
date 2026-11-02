@@ -6,6 +6,7 @@ use zest::{
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, Style, TextContent},
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
+mod interaction_checks;
 
 struct Prepared {
     content: TextContent,
@@ -29,6 +30,10 @@ pub(super) struct LayoutDemo {
     labels: Vec<Label>,
     scale: Option<f32>,
     snapshot: Option<LayoutSnapshot>,
+    pointer: Option<Point<Logical>>,
+    hovered: Option<WidgetId>,
+    window_focused: bool,
+    modifiers: winit::keyboard::ModifiersState,
     pub tint: [f32; 4],
 }
 impl LayoutDemo {
@@ -70,6 +75,10 @@ impl LayoutDemo {
             labels,
             scale: None,
             snapshot: None,
+            pointer: None,
+            hovered: None,
+            window_focused: true,
+            modifiers: winit::keyboard::ModifiersState::empty(),
             tint: [1.0; 4],
         })
     }
@@ -87,7 +96,61 @@ impl LayoutDemo {
         viewport: Size<Logical>,
         scale: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.update_geometry(viewport, scale)?;
+        let snapshot = self.snapshot.as_ref().unwrap();
+        for label in &mut self.labels {
+            let Some(bounds) = snapshot.bounds(&label.id) else {
+                if let Some(old) = label.prepared.take().and_then(|prepared| prepared.image) {
+                    renderer.remove_image(old)?;
+                }
+                continue;
+            };
+            let width = bounds.size.width as f32;
+            if width * scale < 1.0 {
+                if let Some(old) = label.prepared.take().and_then(|prepared| prepared.image) {
+                    renderer.remove_image(old)?;
+                }
+                continue;
+            }
+            let content = label.content.as_ref().unwrap();
+            if label
+                .prepared
+                .as_ref()
+                .is_none_or(|prepared| prepared.width != width || &prepared.content != content)
+            {
+                let paragraph = self.raster.paragraph_from_shape(content.shaped(), width)?;
+                let bitmap = paragraph.bitmap();
+                let image = renderer.upload_rgba8(bitmap.width, bitmap.height, &bitmap.rgba8)?;
+                if let Some(old) = label.prepared.take().and_then(|prepared| prepared.image) {
+                    renderer.remove_image(old)?;
+                }
+                label.prepared = Some(Prepared {
+                    content: content.clone(),
+                    width,
+                    paragraph,
+                    image: Some(image),
+                });
+            } else if let Some(prepared) = &mut label.prepared
+                && prepared.image.is_none()
+            {
+                let bitmap = prepared.paragraph.bitmap();
+                prepared.image =
+                    Some(renderer.upload_rgba8(bitmap.width, bitmap.height, &bitmap.rgba8)?);
+            }
+        }
+        Ok(())
+    }
+    /// Refresh CPU geometry before position-dependent input, independently of
+    /// redraw/upload scheduling. Re-hit a stationary pointer after a resize.
+    pub fn update_geometry(
+        &mut self,
+        viewport: Size<Logical>,
+        scale: f32,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         if self.scale != Some(scale) {
+            if self.scale.is_some() {
+                self.pointer = None;
+            }
             for label in &mut self.labels {
                 label.content = Some(TextContent::new(self.raster.shape(
                     label.source,
@@ -142,42 +205,133 @@ impl LayoutDemo {
             }
         })?;
         let snapshot = self.tree.compute(viewport)?.snapshot;
-        for label in &mut self.labels {
-            let width = snapshot.bounds(&label.id).unwrap().size.width as f32;
-            if width * scale < 1.0 {
-                if let Some(old) = label.prepared.take().and_then(|prepared| prepared.image) {
-                    renderer.remove_image(old)?;
-                }
-                continue;
-            }
-            let content = label.content.as_ref().unwrap();
-            if label
-                .prepared
-                .as_ref()
-                .is_none_or(|prepared| prepared.width != width || &prepared.content != content)
-            {
-                let paragraph = self.raster.paragraph_from_shape(content.shaped(), width)?;
-                let bitmap = paragraph.bitmap();
-                let image = renderer.upload_rgba8(bitmap.width, bitmap.height, &bitmap.rgba8)?;
-                if let Some(old) = label.prepared.take().and_then(|prepared| prepared.image) {
-                    renderer.remove_image(old)?;
-                }
-                label.prepared = Some(Prepared {
-                    content: content.clone(),
-                    width,
-                    paragraph,
-                    image: Some(image),
-                });
-            } else if let Some(prepared) = &mut label.prepared
-                && prepared.image.is_none()
-            {
-                let bitmap = prepared.paragraph.bitmap();
-                prepared.image =
-                    Some(renderer.upload_rgba8(bitmap.width, bitmap.height, &bitmap.rgba8)?);
+        let mut changed = self
+            .snapshot
+            .as_ref()
+            .is_none_or(|old| !old.same_snapshot(&snapshot));
+        self.snapshot = Some(snapshot);
+        let target = self
+            .pointer
+            .filter(|_| self.window_focused)
+            .and_then(|point| self.hit(point));
+        changed |= self.set_hovered(target);
+        if self.scene.focused().is_some_and(|id| !self.visible(id)) {
+            changed |= self.set_focus(None);
+        }
+        Ok(changed)
+    }
+    fn interactive(&self, id: &WidgetId) -> bool {
+        (id == &self.footer || self.labels.iter().any(|label| &label.id == id))
+            && self.scene.state(id).is_some()
+    }
+    fn visible(&self, id: &WidgetId) -> bool {
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            let viewport = snapshot.viewport();
+            snapshot.bounds(id).is_some_and(|bounds| {
+                bounds.size.width * f64::from(self.scale.unwrap_or(1.0)) >= 1.0
+                    && bounds.size.height * f64::from(self.scale.unwrap_or(1.0)) >= 1.0
+                    && bounds
+                        .intersection(&Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height))
+                        .is_some()
+            })
+        })
+    }
+    fn hit(&self, point: Point<Logical>) -> Option<WidgetId> {
+        self.snapshot
+            .as_ref()?
+            .hit_test(point, |id| self.interactive(id) && self.visible(id))
+            .cloned()
+    }
+    fn set_hovered(&mut self, target: Option<WidgetId>) -> bool {
+        if self.hovered == target {
+            return false;
+        }
+        if let Some(old) = self.hovered.take() {
+            self.scene.set_hovered(&old, false);
+        }
+        if let Some(id) = &target {
+            self.scene.set_hovered(id, true);
+        }
+        self.hovered = target;
+        true
+    }
+    fn set_focus(&mut self, target: Option<WidgetId>) -> bool {
+        if self.scene.focused() == target.as_ref() {
+            return false;
+        }
+        match target {
+            Some(id) => self.scene.focus(&id),
+            None => {
+                self.scene.clear_focus();
+                true
             }
         }
-        self.snapshot = Some(snapshot);
-        Ok(())
+    }
+    pub fn pointer_moved(&mut self, point: Point<Logical>) -> bool {
+        if !self.window_focused || !point.x.is_finite() || !point.y.is_finite() {
+            return false;
+        }
+        self.pointer = Some(point);
+        self.set_hovered(self.hit(point))
+    }
+    pub fn pointer_left(&mut self) -> bool {
+        self.pointer = None;
+        self.set_hovered(None)
+    }
+    pub fn pointer_press(&mut self) -> bool {
+        if !self.window_focused {
+            return false;
+        }
+        self.set_focus(self.pointer.and_then(|point| self.hit(point)))
+    }
+    pub fn focus_window(&mut self, focused: bool) -> bool {
+        self.window_focused = focused;
+        if focused {
+            return false;
+        }
+        self.modifiers = winit::keyboard::ModifiersState::empty();
+        let changed = self.pointer_left();
+        self.set_focus(None) || changed
+    }
+    pub fn modifiers(&mut self, modifiers: winit::keyboard::ModifiersState) {
+        self.modifiers = if self.window_focused {
+            modifiers
+        } else {
+            winit::keyboard::ModifiersState::empty()
+        };
+    }
+    pub fn key(&mut self, key: &winit::keyboard::Key, pressed: bool, synthetic: bool) -> bool {
+        if !self.window_focused
+            || !pressed
+            || synthetic
+            || self.modifiers.control_key()
+            || self.modifiers.alt_key()
+            || self.modifiers.super_key()
+            || key != &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
+        {
+            return false;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+        let order: Vec<_> = snapshot
+            .boxes()
+            .iter()
+            .filter(|node| self.interactive(&node.id) && self.visible(&node.id))
+            .map(|node| node.id.clone())
+            .collect();
+        if order.is_empty() {
+            return self.set_focus(None);
+        }
+        let current = order.iter().position(|id| Some(id) == self.scene.focused());
+        let index = if self.modifiers.shift_key() {
+            current.map_or(order.len() - 1, |index| {
+                (index + order.len() - 1) % order.len()
+            })
+        } else {
+            current.map_or(0, |index| (index + 1) % order.len())
+        };
+        self.set_focus(Some(order[index].clone()))
     }
     pub fn paint(&self) -> Result<DisplayList, PaintError> {
         let Some(snapshot) = &self.snapshot else {
@@ -195,14 +349,45 @@ impl LayoutDemo {
                         bounds: Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height),
                         color: [0.0, 0.0, 0.0, 1.0],
                     })?;
-                    for label in &self.labels {
+                    for node in snapshot.boxes() {
+                        let bounds = node.bounds;
+                        if node.id == self.footer {
+                            if !bounds.is_empty() {
+                                let state = self.scene.state(&self.footer).unwrap();
+                                painter.quad(Quad {
+                                    bounds,
+                                    color: if state.focused() {
+                                        [0.2, 0.6, 1.0, 1.0]
+                                    } else if state.hovered() {
+                                        [0.4, 0.8, 1.0, 1.0]
+                                    } else {
+                                        [1.0; 4]
+                                    },
+                                })?;
+                            }
+                            continue;
+                        }
+                        let Some(label) = self.labels.iter().find(|label| label.id == node.id)
+                        else {
+                            continue;
+                        };
                         let Some(prepared) = &label.prepared else {
                             continue;
                         };
                         let Some(id) = prepared.image else {
                             continue;
                         };
-                        let bounds = snapshot.bounds(&label.id).unwrap();
+                        let state = self.scene.state(&label.id).unwrap();
+                        if !bounds.is_empty() && (state.focused() || state.hovered()) {
+                            painter.quad(Quad {
+                                bounds,
+                                color: if state.focused() {
+                                    [0.08, 0.18, 0.3, 1.0]
+                                } else {
+                                    [0.035, 0.06, 0.09, 1.0]
+                                },
+                            })?;
+                        }
                         let bitmap = prepared.paragraph.bitmap();
                         let scale = f64::from(bitmap.scale);
                         let mut image = Image::new(
@@ -217,15 +402,7 @@ impl LayoutDemo {
                         image.tint = self.tint;
                         painter.image(image)?;
                     }
-                    let bounds = snapshot.bounds(&self.footer).unwrap();
-                    if bounds.is_empty() {
-                        Ok(())
-                    } else {
-                        painter.quad(Quad {
-                            bounds,
-                            color: [1.0; 4],
-                        })
-                    }
+                    Ok(())
                 },
             )
         })
@@ -303,6 +480,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     {
         return Err("tint/unchanged layout rerasterized or reuploaded text".into());
     }
+    interaction_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -355,15 +533,4 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn empty_viewports_and_empty_footer_bounds_emit_only_valid_geometry() {
-        let mut demo = LayoutDemo::new().unwrap();
-        demo.tree.sync(&demo.scene, |_| Style::default()).unwrap();
-        demo.snapshot = Some(demo.tree.compute(Size::new(0.0, 0.0)).unwrap().snapshot);
-        assert!(demo.paint().unwrap().is_empty());
-        demo.snapshot = Some(demo.tree.compute(Size::new(40.0, 40.0)).unwrap().snapshot);
-        assert_eq!(demo.paint().unwrap().len(), 1); // background, zero-height footer omitted
-    }
-}
+mod tests;
