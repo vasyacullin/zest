@@ -94,7 +94,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .id,
         first
     );
-    assert!(view.find_visible_target(query)?.focus(&mut scene));
+    let bound = view.find_visible_target(query)?;
+    let reveal = view.reveal_target(&bound).unwrap();
+    assert!(reveal.adjustments().is_empty());
+    assert!(reveal.can_apply(&scene, &reordered.snapshot));
+    assert!(bound.focus(&mut scene));
     assert_eq!(
         initial.snapshot.hit_test(point, |id| id != &toolbar),
         Some(&second)

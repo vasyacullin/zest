@@ -150,6 +150,30 @@ layout, shaping, uploads or state mutation; the default layout feature stays fon
 independent. Headless and GPU smoke compare semantic hits/visible targets with scene
 input and rendered pixels across clipping and scrolling.
 
+`SemanticView::reveal_target(&target)` binds nearest-edge reveal advice to the
+observed target and each changed scroll-owner instance. `SemanticRevealPlan`
+exposes the target, source layout, predicted visible bounds and inner-to-outer
+`SemanticScrollAdjustment`s with absolute, clamped offsets. Missing geometry,
+unreachable/empty bounds, missing semantic owners or a mismatched target binding
+return None. Planning remains available for disabled or modal-blocked observations.
+
+Before applying offsets, call `plan.can_apply(&scene, &current_layout)` with freshly
+synchronized geometry. It requires the exact source layout snapshot and live,
+currently input-eligible target and changed owners. Recreated/foreign instances,
+new layout snapshots (including independently computed equal geometry), disabled
+targets and owners outside the active modal scope fail this check. An empty plan
+does not require input access to unchanged outer owners. The guard cannot certify
+that callers synchronized styles or paired compatible snapshots.
+
+The caller applies all accepted offsets to styles, recomputes layout and checks
+current visibility and target eligibility before focusing or dispatching an action.
+After a nonempty plan changes geometry, obtain a fresh plan before reuse. Planning
+and validation themselves do not scroll or focus anything. The preview's semantic
+helper reveals hidden targets through this path, then uses its shared activation
+route with current physical-pixel/window checks. Already visible targets retain
+their scroll position. Unit and GPU checks cover modal owner limits, stale bindings,
+nearest-edge scrolling and rendered selection without reshaping or uploading text.
+
 `Style::clip_children` (default false) intersects descendants' clips with that
 node's border bounds, in logical coordinates. It affects both axes and propagates
 through nonclipping descendants. A nonclipping parent permits overflow; an empty

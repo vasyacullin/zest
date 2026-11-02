@@ -27,6 +27,7 @@ mod scrollbar_checks;
 mod scrollbar_input;
 mod semantic_checks;
 mod semantic_diff_checks;
+mod semantic_reveal_checks;
 mod semantic_target_checks;
 mod semantic_view_checks;
 
@@ -636,6 +637,47 @@ impl LayoutDemo {
         changed |= self.refresh_input();
         changed
     }
+    /// Reveal a hidden semantic target before using the shared activation route.
+    /// Changed scroll owners must be inside the current modal input scope.
+    fn semantic_reveal_and_activate(
+        &mut self,
+        target: &SemanticTarget,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if !self.window_focused
+            || !target.input_allowed(&self.scene)
+            || !self.interactive(target.id())
+        {
+            return Ok(false);
+        }
+        if self.visible(target.id()) {
+            return Ok(self.semantic_activate(target));
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return Ok(false);
+        };
+        let view = snapshot.semantic_view(&self.scene.semantic_snapshot());
+        let Some(plan) = view.reveal_target(target) else {
+            return Ok(false);
+        };
+        let scale = f64::from(self.scale.unwrap_or(1.0));
+        if !plan.can_apply(&self.scene, snapshot)
+            || plan.visible_bounds().size.width * scale < 1.0
+            || plan.visible_bounds().size.height * scale < 1.0
+            || plan
+                .adjustments()
+                .iter()
+                .any(|change| change.owner().id() != &self.root)
+        {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for change in plan.adjustments() {
+            changed |= self.scroll_to(change.offset(), false)?;
+        }
+        // scroll_to publishes current geometry; activation checks it again.
+        changed |= self.semantic_activate(target);
+        Ok(changed)
+    }
     fn route_activation(
         &mut self,
         widget: &WidgetId,
@@ -1082,6 +1124,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     semantic_diff_checks::check(&mut demo, renderer)?;
     semantic_target_checks::check(&mut demo, renderer)?;
     semantic_view_checks::check(&mut demo, renderer)?;
+    semantic_reveal_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -1147,6 +1190,8 @@ mod paint_tests;
 mod scroll_tests;
 #[cfg(test)]
 mod scrollbar_tests;
+#[cfg(test)]
+mod semantic_reveal_tests;
 #[cfg(test)]
 mod semantic_target_tests;
 #[cfg(test)]
