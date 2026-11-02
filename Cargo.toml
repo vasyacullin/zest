@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zest-core", "crates/zest-paint", "crates/zest-gpu", "crates/zest-text", "demos/headless", "demos/quad", "demos/text"]
+members = ["crates/zest-core", "crates/zest-paint", "crates/zest-gpu", "crates/zest-text", "crates/zest-layout", "demos/headless", "demos/quad", "demos/text", "demos/layout"]
 exclude = ["examples/gpui", "examples/egui", "examples/imgui", "examples/dear-imgui-rs"]
 resolver = "3"
 
@@ -16,6 +16,8 @@ zest-core = { path = "crates/zest-core" }
 zest-gpu = { path = "crates/zest-gpu" }
 zest-paint = { path = "crates/zest-paint" }
 zest-text = { path = "crates/zest-text" }
+zest-layout = { path = "crates/zest-layout" }
+taffy = { version = "=0.15.1", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
 unicode-segmentation = "=1.13.3"
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
 wgpu-types = "=30.0.1"
@@ -39,12 +41,14 @@ zest-core.workspace = true
 zest-paint.workspace = true
 zest-gpu = { workspace = true, optional = true }
 zest-text = { workspace = true, optional = true }
+zest-layout = { workspace = true, optional = true }
 
 [features]
 default = []
 gpu = ["dep:zest-gpu"]
 text = ["dep:zest-text"]
 text-raster = ["text", "zest-text/raster"]
+layout = ["dep:zest-layout"]
 
 [lints]
 workspace = true

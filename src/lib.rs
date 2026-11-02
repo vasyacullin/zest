@@ -1,6 +1,7 @@
 //! Zest facade: a headless ECS scene and optional experimental HAL renderer
 //! behind the `gpu` feature. The `text` feature adds a window-independent Unicode
 //! editing model; `text-raster` adds explicit-font paragraph rasterization.
+//! The optional `layout` feature adds retained headless Flexbox scene layout.
 //! Scene widgets are not yet connected to rendering.
 //!
 //! ```
@@ -19,6 +20,8 @@ pub use zest_core::{
 };
 #[cfg(feature = "gpu")]
 pub use zest_gpu as gpu;
+#[cfg(feature = "layout")]
+pub use zest_layout as layout;
 pub use zest_paint as paint;
 #[cfg(feature = "text")]
 pub use zest_text as text;

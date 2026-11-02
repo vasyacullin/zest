@@ -2271,6 +2271,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "taffy"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d"
+dependencies = [
+ "serde",
+ "slotmap",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3272,6 +3282,7 @@ version = "0.1.0"
 dependencies = [
  "zest-core",
  "zest-gpu",
+ "zest-layout",
  "zest-paint",
  "zest-text",
 ]
@@ -3297,6 +3308,21 @@ dependencies = [
 
 [[package]]
 name = "zest-headless"
+version = "0.1.0"
+dependencies = [
+ "zest",
+]
+
+[[package]]
+name = "zest-layout"
+version = "0.1.0"
+dependencies = [
+ "taffy",
+ "zest-core",
+]
+
+[[package]]
+name = "zest-layout-demo"
 version = "0.1.0"
 dependencies = [
  "zest",

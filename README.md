@@ -4,7 +4,7 @@ Zest is an early-stage Rust GUI engine project. The intended architecture combin
 an immediate user API, a persistent internal ECS scene and direct GPU rendering
 through `wgpu-hal`, targeting desktop and mobile applications and tools.
 
-**Current implementation includes a headless scene and an experimental HAL quad demo.**
+**Current implementation includes a headless scene, optional Flexbox layout and an experimental HAL quad demo.**
 The scene provides scoped widget identities,
 validation of scene/subtree declarations before mutation, persistent ECS nodes
 and interaction flags, plus typed coordinate spaces and DPI conversion.
@@ -12,7 +12,8 @@ The separate GPU slice opens a window and renders ordered, clipped quad batches.
 An optional text model provides Unicode editing, transient IME composition and
 bounded undo/redo. Optional paragraph layout/rasterization renders Latin,
 Cyrillic and Arabic in the GPU demo. Scene widgets are not yet connected to
-rendering; widget layout is still planned. The window demo now binds the text
+rendering. An optional retained Flexbox layer computes scene bounds and supplies
+immutable logical snapshots. The window demo binds the text
 model to keyboard/IME events and paints caret, selection and preedit geometry.
 See [plan.md](plan.md) for the full roadmap and acceptance criteria.
 
@@ -23,6 +24,7 @@ Install Rust 1.95 or newer, then run from this repository root:
 ```sh
 cargo run -p zest-headless
 cargo run -p zest-text-demo
+cargo run -p zest-layout-demo
 cargo run -p zest-quad
 cargo run -p zest-quad -- --smoke
 cargo test --workspace --all-features --locked
@@ -32,6 +34,62 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 The demo reorders keyed buttons, then partially updates their container while
 retaining a button's focus/hover and a status sibling. Explicit keys are required
 in this initial API; automatic call-site keys are planned.
+
+## Retained Flexbox layout
+
+Enable `zest`'s `layout` feature to use `zest::layout`, or depend directly on
+`zest-layout`. It keeps a private [Taffy 0.15.1](https://docs.rs/taffy/0.15.1/taffy/)
+tree keyed by the scene's `WidgetId`; Taffy/ECS node IDs stay private. The default
+facade does not include this dependency. Layout needs no fonts, window or GPU.
+
+```rust
+use zest::{Scene, geometry::Size, layout::{LayoutTree, Length, Style}};
+
+let mut scene = Scene::default();
+let mut save = None;
+scene.update(|ui| save = Some(ui.button("save", "Save"))).unwrap();
+let mut layout = LayoutTree::default();
+layout.sync(&scene, |_| Style {
+    width: Length::Px(100.0),
+    height: Length::Px(24.0),
+    ..Default::default()
+}).unwrap();
+let frame = layout.compute(Size::new(400.0, 200.0)).unwrap();
+let bounds = frame.snapshot.bounds(&save.unwrap()).unwrap();
+assert_eq!(bounds.size.width, 100.0);
+```
+
+The initial style supports no-wrap rows/columns, auto/pixel/percentage dimensions
+(0.5 means 50%), minimum sizes, padding, gap, flex grow/shrink and cross/main-axis
+alignment. Minimum sizes default to zero. Leaves use the caller's
+`intrinsic_size` for auto content dimensions; nonempty containers measure their
+children. Supply new intrinsic metrics when text, fonts or other content change.
+Font measurement and width-dependent text wrapping are not yet integrated.
+Scene roots sit inside a private viewport-sized, stretched vertical column.
+
+`sync` walks the complete scene and evaluates the style callback before changing
+any layout node. Invalid styles and callback panics leave the accepted tree and
+snapshot intact. It updates only changed styles and child lists, retains nodes
+through keyed reorders, and removes omitted nodes. Partial `Scene::update_children`
+updates are reflected by the next complete layout sync. Hover/focus and label
+changes do not invalidate layout unless the supplied style/metrics also change.
+
+`compute` returns absolute, unrounded `Rect<Logical>` bounds in parent-before-child
+declaration order. Taffy's calculations use f32 logical pixels; DPI conversion
+belongs to painting/platform code. Zero-sized viewports are supported. Invalid
+dimensions are rejected, and nonfinite coordinates or negative computed sizes are never
+published. Existing snapshot clones remain immutable after edits or failures.
+`snapshot()` returns None while accepted layout inputs await computation.
+Unchanged inputs reuse the same snapshot without calling Taffy; other updates
+reuse Taffy's retained caches where constraints permit. `SyncStats` counts changed
+nodes/child lists, and `ComputeStats` reports engine execution and intrinsic
+measurement calls, rather than total node visits.
+
+The headless `zest-layout-demo` checks reorder identity, focus/hover, fractional
+bounds, snapshot/cache reuse and explicit conversion of layout bounds into quads.
+The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout, scrolling,
+clipping, automatic scene paint extraction and layout-driven input remain future
+work; this is the first layout slice, not a complete widget system.
 
 ## Experimental GPU slice
 
