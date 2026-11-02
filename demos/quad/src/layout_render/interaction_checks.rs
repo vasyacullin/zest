@@ -131,6 +131,7 @@ pub(super) fn check(
     )?;
     demo.focus_window(true);
     availability_checks(demo, renderer, point)?;
+    super::modal_checks::check(demo, renderer, point)?;
     demo.prepare(renderer, snapshot.viewport(), 1.25)?;
     demo.labels[0]
         .prepared
@@ -151,7 +152,7 @@ pub(super) fn check(
         return Err("hover/focus/activation changed layout, text images or ECS archetypes".into());
     }
     println!(
-        "GPU layout input checks passed: hover/pressed/selection/disabled pixels, Enter/Space/F2/Tab, focus loss, repeat filtering, shared snapshot/paragraph/images and stable ECS archetypes"
+        "GPU layout input checks passed: hover/pressed/selection/disabled/modal pixels, Enter/Space/F2/F3/Tab/Esc, focus trapping/restoration/loss, repeat filtering, shared snapshot/paragraph/images and stable ECS archetypes"
     );
     Ok(())
 }

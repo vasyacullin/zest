@@ -345,3 +345,116 @@ fn disabling_a_selected_node_retains_selection_but_cancels_keyboard_activation()
     assert!(!demo.pointer_press());
     assert!(!demo.pointer_release());
 }
+
+#[test]
+fn modal_preview_traps_tab_and_pointer_input_then_restores_the_previous_focus() {
+    let mut demo = demo();
+    let title = demo.labels[0].id.clone();
+    let body = demo.labels[1].id.clone();
+    let footer = demo.footer.clone();
+    let snapshot = demo.snapshot.as_ref().unwrap().clone();
+    let archetypes = demo.scene.stats().archetypes;
+    demo.set_focus(Some(footer.clone()));
+    assert!(demo.key(&Key::Named(NamedKey::F3), true, false));
+    assert_eq!(demo.scene.modal_root(), Some(&body));
+    assert_eq!(demo.scene.focused(), Some(&body));
+    demo.pointer_moved(center(&demo, &title));
+    assert!(demo.hovered.is_none());
+    assert!(!demo.pointer_press() && !demo.pointer_release());
+    assert_eq!(demo.scene.focused(), Some(&body));
+    assert!(!tab(&mut demo));
+    demo.modifiers(ModifiersState::SHIFT);
+    assert!(!tab(&mut demo));
+    demo.modifiers(ModifiersState::empty());
+    let enter = Key::Named(NamedKey::Enter);
+    demo.key(&enter, true, false);
+    demo.key(&enter, false, false);
+    assert_eq!(demo.selected.as_ref(), Some(&body));
+    assert!(demo.key(&Key::Named(NamedKey::Escape), true, false));
+    assert!(!demo.modal_active());
+    assert_eq!(demo.scene.focused(), Some(&footer));
+    assert_eq!(demo.hovered.as_ref(), Some(&title));
+    assert_eq!(demo.selected.as_ref(), Some(&body));
+    assert!(!demo.update_geometry(snapshot.viewport(), 1.25).unwrap());
+    assert!(snapshot.same_snapshot(demo.snapshot.as_ref().unwrap()));
+    assert_eq!(demo.scene.stats().archetypes, archetypes);
+}
+
+#[test]
+fn modal_boundaries_cancel_presses_and_disabling_the_root_closes_the_scope() {
+    let mut demo = demo();
+    let body = demo.labels[1].id.clone();
+    let footer = demo.footer.clone();
+    let f3 = Key::Named(NamedKey::F3);
+    let enter = Key::Named(NamedKey::Enter);
+    demo.pointer_moved(center(&demo, &body));
+    demo.pointer_press();
+    assert!(demo.key(&f3, true, false));
+    assert!(!demo.scene.state(&body).unwrap().pressed());
+    assert!(!demo.pointer_release());
+    demo.key(&enter, true, false);
+    demo.key(&f3, true, false);
+    assert!(!demo.key(&enter, false, false));
+    assert!(demo.selected.is_none());
+    demo.set_focus(Some(footer.clone()));
+    demo.key(&f3, true, false);
+    demo.key(&Key::Named(NamedKey::F2), true, false);
+    assert!(!demo.modal_active());
+    assert_eq!(demo.scene.focused(), Some(&footer));
+    assert!(!demo.key(&f3, true, false));
+    demo.key(&Key::Named(NamedKey::F2), true, false);
+    assert!(!demo.modal_active());
+}
+
+#[test]
+fn modal_shortcuts_ignore_synthetic_repeat_modified_and_unfocused_input() {
+    let mut demo = demo();
+    let f3 = Key::Named(NamedKey::F3);
+    let escape = Key::Named(NamedKey::Escape);
+    assert!(!demo.key(&f3, false, false));
+    assert!(!demo.key(&f3, true, true));
+    assert!(!demo.key_event(&f3, true, true, false));
+    demo.modifiers(ModifiersState::CONTROL);
+    assert!(!demo.key(&f3, true, false));
+    demo.modifiers(ModifiersState::empty());
+    demo.focus_window(false);
+    assert!(!demo.key(&f3, true, false));
+    demo.focus_window(true);
+    assert!(demo.key(&f3, true, false));
+    assert!(!demo.key(&escape, false, false));
+    assert!(!demo.key(&escape, true, true));
+    assert!(!demo.key_event(&escape, true, true, false));
+    demo.focus_window(false);
+    assert!(demo.modal_active() && demo.scene.focused().is_none());
+    assert!(!demo.key(&escape, true, false));
+    demo.focus_window(true);
+    tab(&mut demo);
+    assert_eq!(demo.scene.focused(), Some(&demo.labels[1].id));
+    assert!(demo.key(&escape, true, false));
+}
+
+#[test]
+fn clipped_modal_focus_stays_bounded_and_removing_its_root_restores_visible_focus() {
+    let mut demo = demo();
+    let title = demo.labels[0].id.clone();
+    let f3 = Key::Named(NamedKey::F3);
+    demo.set_focus(Some(title.clone()));
+    demo.key(&f3, true, false);
+    demo.update_geometry(Size::new(480.0, 50.0), 1.25).unwrap();
+    assert!(demo.modal_active() && demo.scene.focused().is_none());
+    assert!(!tab(&mut demo));
+    demo.key(&Key::Named(NamedKey::Escape), true, false);
+    assert_eq!(demo.scene.focused(), Some(&title));
+    assert!(!demo.key(&f3, true, false));
+    demo.update_geometry(Size::new(480.0, 450.0), 1.25).unwrap();
+    demo.key(&f3, true, false);
+    demo.scene
+        .update_children(&demo.root, |ui| {
+            ui.button("title", demo.labels[0].source);
+            ui.button("footer", "Layout follows text");
+        })
+        .unwrap();
+    demo.update_geometry(Size::new(480.0, 450.0), 1.25).unwrap();
+    assert!(!demo.modal_active());
+    assert_eq!(demo.scene.focused(), Some(&title));
+}

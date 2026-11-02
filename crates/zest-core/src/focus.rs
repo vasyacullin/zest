@@ -18,6 +18,8 @@ impl Scene {
     /// ancestors override enabled children. Disabling immediately clears hover,
     /// focus, pressed state and capture ownership, even if re-enabled before the
     /// next input event. Re-enabling restores no interaction flags automatically.
+    /// Disabling a modal root closes its scope and nested scopes, restoring focus
+    /// when possible; that scope transition also invalidates paint scene-wide.
     ///
     /// Returns false for unknown IDs, true for known IDs (including no-ops).
     ///
@@ -73,6 +75,7 @@ impl Scene {
                 pending.extend(children.iter().cloned().map(|id| (id, disabled)));
             }
         }
+        self.reconcile_modals();
         true
     }
 
@@ -81,12 +84,16 @@ impl Scene {
     /// Containers are skipped. If the old focus is excluded, start at the first
     /// (or last) eligible node; an empty order clears focus. Returns whether focus
     /// changed. No cached order can outlive a reconciliation.
+    /// When a modal scope is open, traversal stays inside its innermost root.
     pub fn focus_next(
         &mut self,
         direction: FocusDirection,
         mut accepts: impl FnMut(&WidgetId) -> bool,
     ) -> bool {
-        let mut pending: Vec<_> = self.roots().iter().rev().cloned().collect();
+        let mut pending: Vec<_> = match self.modal_root() {
+            Some(root) => vec![root.clone()],
+            None => self.roots().iter().rev().cloned().collect(),
+        };
         let mut order = Vec::new();
         while let Some(id) = pending.pop() {
             let state = self.state(&id).unwrap();

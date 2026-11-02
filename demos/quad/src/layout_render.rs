@@ -8,6 +8,7 @@ use zest::{
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
 mod interaction_checks;
+mod modal_checks;
 
 struct Prepared {
     content: TextContent,
@@ -217,7 +218,6 @@ impl LayoutDemo {
         if changed {
             self.activation.cancel(&mut self.scene);
         }
-        changed |= self.activation.reconcile(&mut self.scene);
         if self
             .selected
             .as_ref()
@@ -227,19 +227,28 @@ impl LayoutDemo {
             changed = true;
         }
         self.snapshot = Some(snapshot);
+        changed |= self.refresh_input();
+        Ok(changed)
+    }
+    fn refresh_input(&mut self) -> bool {
+        let mut changed = self.activation.reconcile(&mut self.scene);
         let target = self
             .pointer
             .filter(|_| self.window_focused)
             .and_then(|point| self.hit(point));
         changed |= self.set_hovered(target);
-        if self.scene.focused().is_some_and(|id| !self.visible(id)) {
+        if self
+            .scene
+            .focused()
+            .is_some_and(|id| !self.window_focused || !self.interactive(id) || !self.visible(id))
+        {
             changed |= self.set_focus(None);
         }
-        Ok(changed)
+        changed
     }
     fn interactive(&self, id: &WidgetId) -> bool {
         (id == &self.footer || self.labels.iter().any(|label| &label.id == id))
-            && self.scene.state(id).is_some_and(|state| state.enabled())
+            && self.scene.input_allowed(id)
     }
     fn visible(&self, id: &WidgetId) -> bool {
         self.snapshot.as_ref().is_some_and(|snapshot| {
@@ -294,12 +303,28 @@ impl LayoutDemo {
             return false;
         }
         self.scene.set_enabled(id, enabled);
-        self.activation.reconcile(&mut self.scene);
-        let target = self
-            .pointer
-            .filter(|_| self.window_focused)
-            .and_then(|point| self.hit(point));
-        self.set_hovered(target);
+        self.refresh_input();
+        true
+    }
+    pub fn modal_active(&self) -> bool {
+        self.scene.modal_root().is_some()
+    }
+    fn close_modal(&mut self) -> bool {
+        if !self.scene.pop_modal() {
+            return false;
+        }
+        self.refresh_input();
+        true
+    }
+    fn toggle_modal(&mut self) -> bool {
+        if self.modal_active() {
+            return self.close_modal();
+        }
+        let body = self.labels[1].id.clone();
+        if !self.visible(&body) || !self.scene.push_modal(&body) {
+            return false;
+        }
+        self.refresh_input();
         true
     }
     pub fn pointer_moved(&mut self, point: Point<Logical>) -> bool {
@@ -327,7 +352,11 @@ impl LayoutDemo {
             return false;
         }
         let target = self.pointer.and_then(|point| self.hit(point));
-        let changed = self.set_focus(target.clone());
+        let changed = if target.is_some() || !self.modal_active() {
+            self.set_focus(target.clone())
+        } else {
+            false
+        };
         let result = self
             .activation
             .pointer_press(&mut self.scene, target.as_ref());
@@ -385,6 +414,12 @@ impl LayoutDemo {
     ) -> bool {
         if !self.window_focused || synthetic {
             return false;
+        }
+        if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) {
+            return pressed && !repeat && self.close_modal();
+        }
+        if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F3) {
+            return pressed && !repeat && !self.unsupported_modifiers() && self.toggle_modal();
         }
         if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F2) {
             if !pressed || repeat || self.unsupported_modifiers() {
@@ -470,7 +505,7 @@ impl LayoutDemo {
                                 let state = self.scene.state(&self.footer).unwrap();
                                 painter.quad(Quad {
                                     bounds,
-                                    color: if !state.enabled() {
+                                    color: if !self.scene.input_allowed(&self.footer) {
                                         [0.12, 0.12, 0.12, 1.0]
                                     } else if state.pressed() {
                                         [0.05, 0.3, 0.6, 1.0]
@@ -524,7 +559,7 @@ impl LayoutDemo {
                             ),
                         );
                         image.tint = self.tint;
-                        if !state.enabled() {
+                        if !self.scene.input_allowed(&label.id) {
                             for channel in &mut image.tint[..3] {
                                 *channel *= 0.35;
                             }
@@ -539,11 +574,22 @@ impl LayoutDemo {
                                     bounds.size.width,
                                     height,
                                 ),
-                                color: if state.enabled() {
+                                color: if self.scene.input_allowed(&label.id) {
                                     [0.1, 0.75, 0.3, 1.0]
                                 } else {
                                     [0.12, 0.12, 0.12, 1.0]
                                 },
+                            })?;
+                        }
+                        if self.scene.modal_root() == Some(&label.id) && !bounds.is_empty() {
+                            painter.quad(Quad {
+                                bounds: Rect::from_xywh(
+                                    bounds.origin.x,
+                                    bounds.origin.y,
+                                    bounds.size.width,
+                                    bounds.size.height.min(2.0),
+                                ),
+                                color: [1.0, 0.6, 0.1, 1.0],
                             })?;
                         }
                     }

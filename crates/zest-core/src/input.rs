@@ -47,7 +47,7 @@ struct Target {
 impl Target {
     fn new(scene: &mut Scene, id: Option<&WidgetId>, capture: u8) -> Option<Self> {
         let id = id?;
-        if !scene.state(id)?.enabled() {
+        if !scene.input_allowed(id) {
             return None;
         }
         let entity = *scene.entities.get(id)?;
@@ -71,9 +71,10 @@ impl Target {
     }
     fn valid(&self, scene: &Scene) -> bool {
         self.live(scene)
+            && scene.input_allowed(&self.id)
             && scene
                 .state(&self.id)
-                .is_some_and(|state| state.enabled() && state.0 & self.capture != 0)
+                .is_some_and(|state| state.0 & self.capture != 0)
     }
     fn pressed(&self, scene: &mut Scene, pressed: bool) -> bool {
         if !self.valid(scene) {

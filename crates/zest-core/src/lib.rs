@@ -3,6 +3,7 @@
 mod focus;
 pub mod geometry;
 pub mod input;
+mod modal;
 pub mod resource;
 pub use focus::FocusDirection;
 
@@ -180,6 +181,7 @@ pub struct Scene {
     // None is the scene root. Only containers and the scene root have entries.
     children: HashMap<Option<WidgetId>, Vec<WidgetId>>,
     focused: Option<WidgetId>,
+    modals: Vec<modal::ModalFrame>,
 }
 impl Scene {
     /// Replaces the complete scene declaration. Omitted nodes are removed.
@@ -196,6 +198,8 @@ impl Scene {
     /// Omitted descendants are removed, including their focus. Invalid targets
     /// are rejected before calling the builder; duplicate IDs leave the scene
     /// unchanged. Both declaration and deletion work are local to this subtree.
+    /// Removing a modal root also closes its scopes and updates scene-wide input
+    /// eligibility, paint and saved focus.
     ///
     /// ```
     /// use zest_core::Scene;
@@ -342,6 +346,7 @@ impl Scene {
         } else {
             self.children = next_children;
         }
+        self.reconcile_modals();
         Ok(stats)
     }
 
@@ -372,6 +377,9 @@ impl Scene {
             .map(|n| n.label.as_str())
     }
     pub fn set_hovered(&mut self, id: &WidgetId, hovered: bool) -> bool {
+        if hovered && !self.input_allowed(id) {
+            return false;
+        }
         let Some(&entity) = self.entities.get(id) else {
             return false;
         };
@@ -379,18 +387,15 @@ impl Scene {
             .world
             .get_mut::<WidgetState>(entity)
             .expect("scene state");
-        if hovered && !state.enabled() {
-            return false;
-        }
         if state.hovered() != hovered {
             state.set(WidgetState::HOVERED, hovered);
             state.set(WidgetState::PAINT_DIRTY, true);
         }
         true
     }
-    /// Unknown or disabled targets do not disturb the current focus.
+    /// Unknown, disabled or modal-blocked targets do not disturb the current focus.
     pub fn focus(&mut self, id: &WidgetId) -> bool {
-        if self.state(id).is_none_or(|state| !state.enabled()) {
+        if !self.input_allowed(id) {
             return false;
         }
         if self.focused.as_ref() == Some(id) {
@@ -433,6 +438,8 @@ impl Scene {
 
 #[cfg(test)]
 mod availability_tests;
+#[cfg(test)]
+mod modal_tests;
 #[cfg(test)]
 mod reconciliation_tests;
 

@@ -144,6 +144,10 @@ synthetic keys cannot activate nodes. Unsupported modifiers cancel a pending pre
 F2 toggles the body label's enabled state. Disabled labels are dimmed, reject
 pointer/keyboard activation and are skipped by Tab; selection stays retained.
 Re-enabling re-hits a stationary pointer without restoring the old focus/press.
+F3 restricts input to the body label and marks its top edge in amber. Other nodes
+are dimmed and reject clicks; Tab/Shift+Tab stays in the scope. Esc or F3 closes
+it and restores the previous visible, available focus. F2 disabling the scoped
+label also closes its scope. These shortcuts ignore synthetic/repeated events.
 Fully clipped or subpixel-sized targets are skipped. Geometry is refreshed before
 pointer/keyboard input, and resize re-hits a stationary pointer. DPI changes discard
 stale pointer coordinates; focus remains on the keyed node while it is visible.
@@ -152,7 +156,8 @@ DPI, occlusion and Tab changes cancel a pending gesture without activating it.
 Keyed reorder retains focus/selection; removal clears them. These changes update
 scene flags and paint without invalidating layout, paragraphs or text images.
 Repeated movement within one target requests no redraw.
-Text/IME editing remains in the default demo. Esc closes either mode.
+Text/IME editing remains in the default demo. Esc closes the layout window when
+no modal scope is open.
 The raster bitmap budgets still apply. Layout smoke uses controlled input replay
 for state/highlight pixels and ignores live pointer/Tab input for deterministic
 captures; native keyboard/window focus and outside-window release delivery still
@@ -175,7 +180,7 @@ value, `WidgetState::enabled()`, includes disabled ancestors; an enabled child
 cannot override a disabled container. `Scene::locally_enabled` reads the local
 setting. New children inherit effective availability, including during partial
 updates. Reorders and label changes retain local settings; deletion resets them.
-Disabling walks only the affected subtree, marks changed appearance dirty, and
+Availability propagation walks only the affected subtree, marks changed appearance dirty, and
 immediately clears hover/focus/pressed/capture flags. Re-enabling before another
 input event cannot revive an old gesture. These flags share the existing ECS
 component and do not affect layout or archetypes. `focus` and `set_hovered(true)`
@@ -186,6 +191,28 @@ buttons in declaration preorder, wraps, and skips containers/disabled subtrees.
 The predicate supplies application eligibility, such as current viewport bounds.
 An excluded old focus starts at the first/last candidate; no candidates clears
 focus. It returns whether focus changed. The preview uses this shared traversal.
+
+`Scene::push_modal(root)` and `pop_modal()` manage a stack of modal input scopes.
+The innermost `modal_root()` and its descendants are the only input-eligible nodes;
+`input_allowed(id)` also checks effective availability. Use it for hit testing.
+Explicit focus, hover, activation and Tab traversal enforce the same boundary.
+Scope roots may be containers or individual buttons. Nested roots must belong to
+the current scope; invalid pushes and empty pops return false without mutation.
+Opening preserves an eligible focus inside the scope, or selects its first enabled
+button. An empty scope traps input with no focused widget. Closing restores the
+saved focus only if its exact ECS generation remains available inside the outer
+scope; otherwise focus stays empty. Removing or disabling a scope root closes it
+and every nested scope, restoring the invalidated outer scope's previous focus.
+Re-enabling/recreating roots does not reopen them. Reorders retain live scopes.
+
+Every successful scope transition revokes all in-flight gestures, including ones
+inside the new scope, clears blocked hover, and marks the scene paint-dirty.
+Text/layout caches, enabled settings and ECS archetypes remain unchanged. Call
+`ActivationState::reconcile` after scope changes before querying cached capture.
+This API manages input boundaries; applications paint overlays/portals, filter
+visibility and handle outside clicks or window lifecycle. The preview retains
+focus on outside clicks, keeps scopes across window blur, and clears clipped
+restored focus using current geometry. Full dialog/overlay widgets remain future work.
 
 ## Experimental GPU slice
 
@@ -681,15 +708,18 @@ assert_eq!(scene.stats().nodes, 3); // status survives
 The partial builder starts inside the target container's identity path. Repeat
 only scopes declared inside it; do not redeclare the target. Omitted descendants
 are removed, so an empty builder clears the container. Retained widgets keep
-their ECS entities and interaction state; removing the focused widget clears
-focus. Unknown targets, buttons used as targets, duplicate IDs and declarations
+their ECS entities and interaction state; removing a widget clears its focus.
+Removing a modal root also closes its nested scopes, restores saved focus when
+available and refreshes scene-wide input eligibility/paint. Unknown targets,
+buttons used as targets, duplicate IDs and declarations
 outside the target subtree are rejected before scene mutation.
 
 `roots()` and `children(&id)` expose declaration order without exposing ECS types.
 Child lookup returns `None` for an unknown ID and an empty slice for an existing
 empty node. The retained hierarchy lets partial reconciliation walk only the
 old and new descendants of the chosen container. Updates remain synchronous
-and explicit; there is no automatic dependency tracking or layout engine yet.
+and explicit; there is no automatic dependency tracking. The optional layout
+tree is synchronized separately.
 
 ## Coordinates
 
