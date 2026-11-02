@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zest-core", "demos/headless"]
+members = ["crates/zest-core", "crates/zest-gpu", "demos/headless", "demos/quad"]
 exclude = ["examples/gpui", "examples/egui", "examples/imgui", "examples/dear-imgui-rs"]
 resolver = "3"
 
@@ -13,6 +13,11 @@ publish = false
 [workspace.dependencies]
 bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std"] }
 zest-core = { path = "crates/zest-core" }
+zest-gpu = { path = "crates/zest-gpu" }
+naga = { version = "=30.0.1", features = ["wgsl-in"] }
+wgpu-types = "=30.0.1"
+raw-window-handle = "=0.6.2"
+winit = "=0.30.13"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -28,6 +33,11 @@ publish.workspace = true
 
 [dependencies]
 zest-core.workspace = true
+zest-gpu = { workspace = true, optional = true }
+
+[features]
+default = []
+gpu = ["dep:zest-gpu"]
 
 [lints]
 workspace = true

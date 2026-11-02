@@ -1,0 +1,27 @@
+[package]
+name = "zest-gpu"
+description = "Experimental direct HAL quad renderer for Zest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zest-core.workspace = true
+naga.workspace = true
+wgpu-types.workspace = true
+raw-window-handle.workspace = true
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+wgpu-hal = { version = "=30.0.1", features = ["vulkan"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+wgpu-hal = { version = "=30.0.1", features = ["metal"] }
+
+# HAL calls are confined to backend.rs. All other modules deny unsafe code.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -12,3 +12,7 @@ bevy_ecs.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "reconciliation"
+harness = false

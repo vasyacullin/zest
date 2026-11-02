@@ -1,0 +1,15 @@
+[package]
+name = "zest-quad"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zest = { path = "../..", features = ["gpu"] }
+winit.workspace = true
+log = "0.4"
+
+[lints]
+workspace = true
