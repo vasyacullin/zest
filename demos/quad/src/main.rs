@@ -48,6 +48,7 @@ const BOUNDS: Rect<Logical> = Rect::from_xywh(48.0, 48.0, 240.0, 140.0);
 struct App {
     renderer: Option<Renderer>,
     demo_image: Option<ImageId>,
+    text: text_render::TextDemo,
     window: Option<Arc<Window>>,
     backend: Backend,
     smoke: bool,
@@ -74,6 +75,7 @@ impl App {
         let window = self.window.as_ref().unwrap();
         let scale = ScaleFactor::new(window.scale_factor())?;
         let renderer = self.renderer.as_mut().unwrap();
+        self.text.prepare(renderer, window.scale_factor() as f32)?;
         let quad = Quad {
             bounds: BOUNDS,
             color: if self.hovered {
@@ -88,12 +90,12 @@ impl App {
         let list = if clear_only {
             DisplayList::default()
         } else {
-            demo_list(self.hovered, self.demo_image.unwrap())?
+            demo_list(self.hovered, self.demo_image.unwrap(), &self.text)?
         };
         match renderer.render_list(&list, scale)? {
             RenderStatus::Presented => {
                 let stats = renderer.last_frame_stats();
-                if stats.draw_calls != if list.is_empty() { 0 } else { 2 }
+                if stats.draw_calls != if list.is_empty() { 0 } else { 3 }
                     || stats.quads != list.len()
                 {
                     return Err("batch draw counters disagree with the display list".into());
@@ -130,6 +132,7 @@ impl App {
                 check_batch_pixels(renderer)?;
                 image_checks::check(renderer)?;
                 upload_checks::check(renderer)?;
+                self.text.check(renderer)?;
                 if let Some(path) = &self.capture_path {
                     let size = window.inner_size();
                     let capture = renderer.capture_list(&list, scale, size.width, size.height)?;
@@ -152,7 +155,11 @@ impl App {
     }
 }
 
-fn demo_list(hovered: bool, image: ImageId) -> Result<DisplayList, PaintError> {
+fn demo_list(
+    hovered: bool,
+    image: ImageId,
+    text: &text_render::TextDemo,
+) -> Result<DisplayList, PaintError> {
     DisplayList::build(|p| {
         p.quad(Quad {
             bounds: BOUNDS,
@@ -188,7 +195,8 @@ fn demo_list(hovered: bool, image: ImageId) -> Result<DisplayList, PaintError> {
         })?;
         p.with_clip(Rect::from_xywh(80.0, 248.0, 164.0, 80.0), |p| {
             p.image(Image::new(image, Rect::from_xywh(64.0, 240.0, 200.0, 96.0)))
-        })
+        })?;
+        text.paint(p)
     })
 }
 
@@ -398,6 +406,7 @@ impl ApplicationHandler for App {
 
     fn suspended(&mut self, _events: &ActiveEventLoop) {
         self.renderer = None;
+        self.text.reset();
         self.demo_image = None;
         self.window = None;
     }
@@ -511,6 +520,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App {
         renderer: None,
         demo_image: None,
+        text: text_render::TextDemo::new()?,
         window: None,
         backend,
         smoke,
@@ -549,4 +559,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 mod image_checks;
+mod text_render;
 mod upload_checks;

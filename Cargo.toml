@@ -44,6 +44,7 @@ zest-text = { workspace = true, optional = true }
 default = []
 gpu = ["dep:zest-gpu"]
 text = ["dep:zest-text"]
+text-raster = ["text", "zest-text/raster"]
 
 [lints]
 workspace = true

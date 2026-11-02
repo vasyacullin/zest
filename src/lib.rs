@@ -1,6 +1,7 @@
 //! Zest facade: a headless ECS scene and optional experimental HAL renderer
 //! behind the `gpu` feature. The `text` feature adds a window-independent Unicode
-//! editing model. Scene widgets are not yet connected to rendering.
+//! editing model; `text-raster` adds explicit-font paragraph rasterization.
+//! Scene widgets are not yet connected to rendering.
 //!
 //! ```
 //! use zest::geometry::{Logical, Point, Rect, ScaleFactor};

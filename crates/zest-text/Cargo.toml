@@ -1,6 +1,6 @@
 [package]
 name = "zest-text"
-description = "Unicode editing and composition model for Zest"
+description = "Unicode editing and optional paragraph rasterization for Zest"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,12 @@ publish.workspace = true
 
 [dependencies]
 unicode-segmentation.workspace = true
+parley = { version = "=0.11.1", default-features = false, features = ["std", "complex-scripts"], optional = true }
+swash = { version = "=0.2.10", optional = true }
+
+[features]
+default = []
+raster = ["dep:parley", "dep:swash"]
 
 [lints]
 workspace = true

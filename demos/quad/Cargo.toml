@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-zest = { path = "../..", features = ["gpu"] }
+zest = { path = "../..", features = ["gpu", "text-raster"] }
 winit.workspace = true
 log = "0.4"
 

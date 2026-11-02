@@ -1,7 +1,8 @@
 //! Window-independent UTF-8 editing. Cursor motion uses extended grapheme
 //! clusters in logical string order; visual bidi navigation needs a layout engine.
 //! Preedit is transient and never changes committed text or history. No font,
-//! shaping, rasterization or OS event dependencies are required.
+//! shaping, rasterization or OS event dependencies are required by default.
+//! The optional `raster` feature adds explicit-font paragraph layout and bitmaps.
 //!
 //! ```
 //! use zest_text::{Movement, TextBuffer};
@@ -23,6 +24,9 @@ use unicode_segmentation::UnicodeSegmentation;
 mod history;
 use history::{Edit, History};
 pub use history::{HistoryLimits, HistoryStats};
+
+#[cfg(feature = "raster")]
+pub mod raster;
 
 /// UTF-8 byte offsets, with direction preserved. A buffer accepts these only
 /// at extended grapheme boundaries; IME cursors accept any scalar boundary.

@@ -10,8 +10,9 @@ validation of scene/subtree declarations before mutation, persistent ECS nodes
 and interaction flags, plus typed coordinate spaces and DPI conversion.
 The separate GPU slice opens a window and renders ordered, clipped quad batches.
 An optional text model provides Unicode editing, transient IME composition and
-bounded undo/redo. Scene widgets are not yet connected to rendering; layout,
-text shaping/rasterization and OS IME integration are still planned.
+bounded undo/redo. Optional paragraph layout/rasterization renders Latin,
+Cyrillic and Arabic in the GPU demo. Scene widgets are not yet connected to
+rendering; widget layout and OS IME integration are still planned.
 See [plan.md](plan.md) for the full roadmap and acceptance criteria.
 
 ## Run
@@ -38,7 +39,7 @@ Apple targets. The default `zest` facade stays headless; enable its `gpu` featur
 to use `zest::gpu::{Renderer, Quad}`. HAL, Naga and wgpu-types are pinned together
 at 30.0.1; the high-level `wgpu` crate is not used.
 
-The demo renders overlapping quads and a checker texture with rectangular clips and changes the
+The demo renders overlapping quads, a checker texture and text with rectangular clips and changes the
 left quad's color on hover. Resize and DPI events update surface/geometry. Normal
 operation uses an event-driven `Wait` loop, without continuous redraw requests.
 Close the window or press Esc to exit. Linux needs a Vulkan driver/loader and
@@ -99,6 +100,12 @@ the demo display list rendered offscreen as PPM:
 cargo run -p zest-quad -- --smoke --capture target/quad-smoke.ppm
 ```
 
+Text checks shape Latin/Cyrillic/Arabic with explicit fallback fonts, upload
+white coverage textures, and compare every readback pixel to the CPU coverage
+blended on black in linear space (two byte tolerance after sRGB encoding).
+They cover DPI 1/1.25/1.5, clipping and texture retirement. This verifies the
+CPU-to-GPU path; it does not replace independent reference shaping goldens.
+
 `Renderer::capture` and `capture_list` provide synchronous packed sRGB RGBA8 readback for tests and
 screenshots. Ordinary rendering never reads back pixels. Smoke fails on renderer
 or validation errors; Vulkan loader diagnostics are printed and counted
@@ -146,7 +153,7 @@ Invalid quad input is rejected even when clipped out. A returned clip-scope erro
 rolls back its commands, and a failed list builder exposes no partial snapshot.
 Child painters preserve the parent's clip without a mutable global clip stack.
 Clipping trims axis-aligned rectangles and adjusts image UVs on the CPU; rounded clips,
-transforms, text and automatic extraction from the ECS scene remain
+transforms, dedicated glyph primitives and automatic extraction from the ECS scene remain
 future work.
 
 ## Image resources
@@ -206,7 +213,7 @@ at compile time; exhausted generations retire slots instead of wrapping.
 ## Unicode editing model
 
 Enable the facade's `text` feature to use `zest::text`, or depend directly on
-`zest-text`. It has no window, font, ECS or GPU dependencies. The deterministic
+`zest-text`. Its default editing model has no window, font, ECS or GPU dependencies. The deterministic
 console demo (`cargo run -p zest-text-demo`) checks editing and composition;
 it does not open a text editor window.
 
@@ -251,8 +258,57 @@ both stacks and their combined payload size.
 
 This initial `String` model scans grapheme boundaries and shifts text during
 edits. It is intended for short UI fields; it has no large-document performance
-claim. Font selection, shaping, glyph caching, text rendering, scrolling,
-clipboard and native IME event routing are not implemented yet.
+claim. Scrolling, clipboard and native IME event routing are not implemented yet.
+
+## Paragraph shaping and rasterization
+
+Enable `zest`'s `text-raster` feature (or `zest-text/raster`) for
+`zest::text::raster::{Rasterizer, RasterOptions}`. Parley/Fontique 0.11.1 perform
+font selection, Unicode shaping, bidi ordering and line wrapping; Swash 0.2.10
+rasterizes monochrome outlines. These dependencies are optional; `text` alone
+retains the small editing-only dependency set. No system fonts are discovered.
+
+```rust
+use zest::text::raster::{RasterOptions, Rasterizer};
+
+let mut raster = Rasterizer::new();
+let families = raster.register_font(std::fs::read("assets/fonts/NotoSans.ttf").unwrap()).unwrap();
+let bitmap = raster.rasterize("Привет, office!", &[families[0].as_str()],
+    RasterOptions { font_size: 24.0, width: 400.0, scale: 1.5 }).unwrap();
+// With the gpu feature: renderer.upload_rgba8(bitmap.width, bitmap.height, &bitmap.rgba8)
+```
+
+Register application-owned font bytes and supply an ordered list of registered
+families for fallback. Missing characters produce tofu glyphs and increment
+`metrics.missing_glyphs`. The demo/test fonts cover Latin/Cyrillic and Arabic,
+not general CJK or emoji. Their source revision, SHA-256 hashes, copyrights and
+SIL OFL 1.1 licenses are in [assets/fonts](assets/fonts/README.md). Libraries do
+not embed these assets; demo binaries embed them and distributions must retain
+their font licenses.
+
+`RasterizedText` contains a white straight-alpha RGBA8 bitmap, physical bitmap
+origin and dimensions, scale and logical typographic metrics. Ink bounds include
+negative overhangs and accents beyond those metrics. To place a bitmap at logical
+paragraph origin `(x, y)`, use image origin `(x + origin_x/scale, y + origin_y/scale)`
+and size `(width/scale, height/scale)`; image tint supplies linear text color.
+Coverage is alpha, so it is not sRGB encoded before upload. Normal GPU rendering
+requires no readback.
+
+Reuse one rasterizer per coarse UI context and retain the resulting bitmap/GPU
+image until text, fonts, wrapping width or DPI changes. The demo reuses its image
+across redraws and replaces/retires it when DPI changes. This first implementation
+rebuilds paragraph layout and rasterizes a whole paragraph per call; it has no
+persistent shaping cache or shared GPU glyph atlas. It renders grayscale outlines
+only, without color emoji, text decorations or visual editing/selection geometry.
+The editing model's byte offsets are not yet connected to layout hit testing.
+
+Each call accepts at most 64 KiB of text. Registered input font bytes total at
+most 16 MiB. Output is limited to 4096 pixels per dimension and 4 Mi pixels;
+retained intermediate glyph masks have a separate 4 MiB limit. These limits do
+not bound the libraries' internal caches or all temporary allocations. Font size
+must be positive and at most 256 logical units, physical font size 1–512 pixels,
+scale positive and at most 8, and physical wrapping width 1–4096 pixels. Invalid
+options, unknown fonts and budget failures return errors. Use trusted font assets.
 
 ## Scene updates
 
@@ -357,9 +413,9 @@ not a report of a successful remote run.
 - `crates/zest-core`: private ECS implementation and public scene API.
 - `crates/zest-paint`: validated quad snapshots and nested rectangular clips.
 - `crates/zest-gpu`: experimental safe wrapper around direct HAL rendering.
-- `crates/zest-text`: Unicode editing, transient preedit and bounded delta history.
+- `crates/zest-text`: Unicode editing, transient preedit, bounded history and optional paragraph rasterization.
 - `demos/headless`: runnable reconciliation example.
-- `demos/quad`: window, clipped quad batches, hover, resize and GPU readback checks.
+- `demos/quad`: window, clipped quad/image/text batches, hover, resize and GPU readback checks.
 - `demos/text`: deterministic console smoke for the Unicode editing model.
 - `examples`: external reference checkouts, excluded from the workspace.
 
@@ -369,4 +425,6 @@ scoped unsafe policy and documented invariants; see the
 
 ## License
 
-Licensed under Apache-2.0; see [LICENSE](LICENSE).
+Source code is licensed under Apache-2.0; see [LICENSE](LICENSE).
+Bundled demo/test fonts retain their SIL OFL 1.1 licenses in
+[assets/fonts](assets/fonts/README.md).
