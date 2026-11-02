@@ -352,6 +352,32 @@ The registry is mutably borrowed during dispatch, so change bindings and apply
 scene edits afterward. Independent registries can handle different event types;
 recursive dispatch through the same registry is not supported.
 
+`Scene::needs_paint()` reports pending scene appearance or structural changes.
+`paint_invalidation()` returns a non-consuming `PaintInvalidation` snapshot:
+`widgets` lists current dirty nodes in declaration preorder (including disabled or
+modal-blocked nodes), while `structure_changed` records additions, removals and
+reorders. Identity scopes are omitted. Removing the last root still produces
+nonempty work through `structure_changed`, even though `widgets` is empty, so the
+old frame can be cleared. This is a coarse signal; damage rectangles and automatic
+display-list extraction are not implemented.
+
+`take_paint_invalidation()` returns that work and clears only the paint flags and
+structural signal. Focus, hover, pressed state and input ownership are preserved.
+Later changes accumulate separately. This is a CPU drain, not a GPU acknowledgement:
+if draining before rendering, retain the returned work across failure/suspension
+and retry it. Alternatively inspect first, then drain after a successful complete
+frame without intervening scene edits. The layout demo follows the latter rule;
+skipped, suspended, resize-required and smoke clear-only frames retain work.
+
+Changing application-owned visual state requires `invalidate_paint(id)` after
+event dispatch. Repeated marks coalesce; unknown IDs return false and known nodes
+may be marked regardless of input eligibility. The preview marks both previous and
+new selection and its parent interception decoration. Invalidating/consuming paint
+does not affect layout, paragraphs, GPU images or ECS archetypes. Initial queries
+scan nodes; collecting/draining traverses the hierarchy. Window exposure, external
+style/layout changes, resizing and device recovery can require repaint independently
+of clean scene flags. The caller still schedules redraws and chooses repaint bounds.
+
 `Scene::set_enabled(id, enabled)` changes a retained local setting. Its effective
 value, `WidgetState::enabled()`, includes disabled ancestors; an enabled child
 cannot override a disabled container. `Scene::locally_enabled` reads the local

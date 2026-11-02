@@ -5,6 +5,8 @@ mod focus;
 pub mod geometry;
 pub mod input;
 mod modal;
+mod paint_invalidation;
+pub use paint_invalidation::PaintInvalidation;
 pub mod resource;
 pub use focus::FocusDirection;
 
@@ -183,6 +185,7 @@ pub struct Scene {
     children: HashMap<Option<WidgetId>, Vec<WidgetId>>,
     focused: Option<WidgetId>,
     modals: Vec<modal::ModalFrame>,
+    paint_structure_changed: bool,
 }
 impl Scene {
     /// Replaces the complete scene declaration. Omitted nodes are removed.
@@ -332,6 +335,11 @@ impl Scene {
 
         // Mark containers whose child sequence changed, including a partial
         // update's retained root. No interaction components are added/removed.
+        self.paint_structure_changed |= stats.created != 0
+            || stats.removed != 0
+            || next_children.iter().any(|(parent, children)| {
+                self.children.get(parent).map_or(&[][..], Vec::as_slice) != children.as_slice()
+            });
         for (parent, children) in &next_children {
             if self.children.get(parent) != Some(children)
                 && let Some(parent) = parent

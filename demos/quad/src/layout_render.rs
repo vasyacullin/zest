@@ -13,6 +13,7 @@ mod event_checks;
 mod focus_checks;
 mod interaction_checks;
 mod modal_checks;
+mod paint_checks;
 mod scroll_chain_checks;
 mod scroll_checks;
 mod scrollbar_checks;
@@ -565,6 +566,10 @@ impl LayoutDemo {
                 &mut self.intercept_activation,
             );
             if dispatch.is_some_and(|result| !result.default_prevented) {
+                if let Some(old) = &self.selected {
+                    self.scene.invalidate_paint(old);
+                }
+                self.scene.invalidate_paint(&action.widget);
                 self.selected = if self.selected.as_ref() == Some(&action.widget) {
                     None
                 } else {
@@ -664,6 +669,7 @@ impl LayoutDemo {
                 return false;
             }
             self.intercept_activation = !self.intercept_activation;
+            self.scene.invalidate_paint(&self.root);
             return true;
         }
         if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F2) {
@@ -727,6 +733,13 @@ impl LayoutDemo {
         };
         let focused = self.scene.focus_next(direction, |id| eligible.contains(id));
         self.reveal_focus() || focused || cancelled
+    }
+    /// Called after painting this scene, without intervening scene edits.
+    /// An unsuccessful/clear-only frame must retain the pending CPU work.
+    pub fn finish_frame(&mut self, status: RenderStatus, scene_painted: bool) {
+        if scene_painted && status == RenderStatus::Presented {
+            self.scene.take_paint_invalidation();
+        }
     }
     pub fn paint(&self) -> Result<DisplayList, PaintError> {
         let Some(snapshot) = &self.snapshot else {
@@ -941,6 +954,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     scrollbar_checks::check(&mut demo, renderer)?;
     scroll_chain_checks::check(renderer)?;
     event_checks::check(&mut demo, renderer)?;
+    paint_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -996,6 +1010,8 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
 mod event_tests;
 #[cfg(test)]
 mod focus_tests;
+#[cfg(test)]
+mod paint_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]

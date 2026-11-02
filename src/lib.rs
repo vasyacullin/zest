@@ -19,8 +19,8 @@ pub use zest_core::geometry;
 pub use zest_core::input;
 pub use zest_core::resource;
 pub use zest_core::{
-    FocusDirection, NodeKind, ReconcileError, Scene, SceneStats, Ui, UpdateStats, WidgetId,
-    WidgetState,
+    FocusDirection, NodeKind, PaintInvalidation, ReconcileError, Scene, SceneStats, Ui,
+    UpdateStats, WidgetId, WidgetState,
 };
 #[cfg(feature = "gpu")]
 pub use zest_gpu as gpu;

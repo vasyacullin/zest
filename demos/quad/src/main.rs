@@ -118,7 +118,8 @@ impl App {
         } else {
             demo_list(self.hovered, self.demo_image.unwrap(), &self.text)?
         };
-        match renderer.render_list(&list, scale)? {
+        let status = renderer.render_list(&list, scale)?;
+        match status {
             RenderStatus::Presented => {
                 let stats = renderer.last_frame_stats();
                 let mut material = None;
@@ -147,6 +148,9 @@ impl App {
                 window.request_redraw();
             }
             RenderStatus::Suspended | RenderStatus::Skipped => {}
+        }
+        if let Some(layout) = &mut self.layout {
+            layout.finish_frame(status, !clear_only);
         }
         if self.smoke {
             if self.frames >= 6 && !self.resized {
