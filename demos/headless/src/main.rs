@@ -1,5 +1,5 @@
 use zest::Scene;
-use zest::event::{EventControl, EventPhase};
+use zest::event::{EventControl, EventHandlers, EventPhase};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scene = Scene::default();
@@ -46,6 +46,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(dispatch.target_reached && !dispatch.default_prevented);
     println!("Focused event: {dispatch:?}; identity scopes do not receive events.");
+    let mut handlers = EventHandlers::new(&scene);
+    handlers.set(
+        &scene,
+        &retained,
+        EventPhase::Target,
+        |_, amount: &mut u32, total: &mut u32| {
+            *total += *amount;
+            EventControl::PreventDefault
+        },
+    );
+    let mut total = 0;
+    let dispatch = handlers
+        .dispatch_focused(&scene, &mut 2, &mut total)
+        .unwrap();
+    assert_eq!(total, 2);
+    assert!(dispatch.default_prevented);
+    println!("Registered button handler updated the application total to {total}.");
     println!("Headless demo: run zest-quad for the experimental window/GPU slice.");
     Ok(())
 }

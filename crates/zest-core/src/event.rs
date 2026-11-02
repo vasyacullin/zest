@@ -2,8 +2,10 @@
 //! the scene immutably; record scene edits/focus changes as intents and apply them
 //! after dispatch. Input normalization and widget default behavior are separate.
 use crate::{Node, Scene, WidgetId};
+mod handlers;
+pub use handlers::EventHandlers;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EventPhase {
     Capture,
     Target,

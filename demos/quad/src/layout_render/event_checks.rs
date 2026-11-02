@@ -69,6 +69,39 @@ pub(super) fn check(
     activate(demo);
     demo.key(&Key::Named(NamedKey::Escape), true, false);
     demo.key(&Key::Named(NamedKey::F6), true, false);
+    demo.activation_handlers.set(
+        &demo.scene,
+        &demo.footer,
+        EventPhase::Target,
+        |_, source, _| {
+            if matches!(source, ActivationSource::Keyboard(_)) {
+                EventControl::PreventDefault
+            } else {
+                EventControl::Continue
+            }
+        },
+    );
+    demo.pointer_moved(point);
+    demo.pointer_press();
+    demo.pointer_release();
+    activate(demo);
+    if demo.selected.as_ref() != Some(&demo.footer) {
+        return Err("registered target filter did not preserve pointer selection during keyboard activation".into());
+    }
+    expect_pixel(
+        &capture(demo, renderer)?,
+        (point.x * 1.25) as u32,
+        (point.y * 1.25) as u32,
+        [89, 225, 149, 255],
+    )?;
+    demo.activation_handlers
+        .remove(&demo.footer, EventPhase::Target);
+    activate(demo);
+    if demo.selected.is_some() {
+        return Err(
+            "removing the target handler did not restore default keyboard activation".into(),
+        );
+    }
     demo.focus_window(false);
     demo.focus_window(true);
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -92,7 +125,7 @@ pub(super) fn check(
         return Err("event routing changed layout, shapes, image uploads or archetypes".into());
     }
     println!(
-        "GPU event checks passed: parent interception, pointer/keyboard defaults, modal boundary, status/selection pixels and retained geometry/text/images"
+        "GPU event checks passed: registered parent/target handlers, keyboard filtering/removal, pointer defaults, modal boundary, status/selection pixels and retained geometry/text/images"
     );
     Ok(())
 }

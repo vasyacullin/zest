@@ -326,8 +326,31 @@ scene immutably. Record reconciliation/focus changes as intents and apply them
 after dispatch. Nested dispatches have independent propagation/default state.
 Each dispatch reads the current hierarchy; a recreated key addresses its new node.
 Validate queued/stale input separately: `ActivationState` checks gesture generations,
-and positional targeting requires current geometry. Routing itself does not store
-listeners or automatically activate, focus, capture input or invalidate paint.
+and positional targeting requires current geometry. Routing does not automatically
+activate, focus, capture input or invalidate paint.
+
+`EventHandlers<E, S>::new(&scene)` stores typed callbacks for components, with one
+callback per widget/phase. `set(&scene, id, phase, callback)` installs or replaces
+that binding; callbacks receive `EventContext`, `&mut E` and `&mut S` for application
+state. They can own captured data, require no Send/Sync bound, and must have a
+`'static` capture lifetime. Pass transient application state through `S`.
+`dispatch(&scene, target, &mut event, &mut state)` and `dispatch_focused` use the
+same scene route and controls. Nodes without a callback continue; `visits` counts
+route nodes/phases rather than callback invocations. The preview registers its
+parent interceptor through this API; the headless demo registers a button action
+that updates application state and prevents the default.
+
+A registry belongs to its original scene. Bindings retain the exact entity
+generation through keyed reorder/label changes; deleted/recreated nodes never
+inherit old callbacks. Explicitly call `set` to bind the new node. Disabled and
+modal-blocked nodes keep their bindings but reject delivery. `prune(&scene)` drops
+stale callbacks after reconciliation and returns the count removed; delivery skips
+them even without pruning. `len` includes stale entries until removal.
+`remove(id, phase)`, replacement and `clear` release owned captures. Foreign scenes
+cannot bind or dispatch; pruning a foreign scene leaves the registry unchanged.
+The registry is mutably borrowed during dispatch, so change bindings and apply
+scene edits afterward. Independent registries can handle different event types;
+recursive dispatch through the same registry is not supported.
 
 `Scene::set_enabled(id, enabled)` changes a retained local setting. Its effective
 value, `WidgetState::enabled()`, includes disabled ancestors; an enabled child

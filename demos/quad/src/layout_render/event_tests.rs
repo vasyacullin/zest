@@ -21,6 +21,43 @@ fn center(bounds: Rect<Logical>) -> Point<Logical> {
 }
 
 #[test]
+fn a_registered_target_handler_can_filter_keyboard_actions_and_be_removed() {
+    let mut demo = demo();
+    demo.activation_handlers.set(
+        &demo.scene,
+        &demo.footer,
+        EventPhase::Target,
+        |_, source, _| {
+            if matches!(source, ActivationSource::Keyboard(_)) {
+                EventControl::PreventDefault
+            } else {
+                EventControl::Continue
+            }
+        },
+    );
+    let point = center(
+        demo.snapshot
+            .as_ref()
+            .unwrap()
+            .bounds(&demo.footer)
+            .unwrap(),
+    );
+    demo.pointer_moved(point);
+    demo.pointer_press();
+    demo.pointer_release();
+    assert_eq!(demo.selected.as_ref(), Some(&demo.footer));
+    activate(&mut demo, NamedKey::Enter);
+    activate(&mut demo, NamedKey::Space);
+    assert_eq!(demo.selected.as_ref(), Some(&demo.footer));
+    assert!(
+        demo.activation_handlers
+            .remove(&demo.footer, EventPhase::Target)
+    );
+    activate(&mut demo, NamedKey::Enter);
+    assert!(demo.selected.is_none());
+}
+
+#[test]
 fn parent_consumes_pointer_and_keyboard_actions_without_disabling_focus_or_gestures() {
     let mut demo = demo();
     let snapshot = demo.snapshot.as_ref().unwrap().clone();

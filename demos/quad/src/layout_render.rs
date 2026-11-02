@@ -2,9 +2,9 @@
 use super::*;
 use zest::{
     FocusDirection, Scene, WidgetId,
-    event::{EventControl, EventPhase},
+    event::{EventControl, EventHandlers, EventPhase},
     geometry::Size,
-    input::{ActivationKey, ActivationState, InputResult},
+    input::{ActivationKey, ActivationSource, ActivationState, InputResult},
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, RevealPlan, Style, TextContent},
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
@@ -48,6 +48,7 @@ pub(super) struct LayoutDemo {
     selected: Option<WidgetId>,
     clipped: bool,
     intercept_activation: bool,
+    activation_handlers: EventHandlers<ActivationSource, bool>,
     scroll_offset: Point<Logical>,
     scrollbar_drag: Option<scrollbar_input::Drag>,
     window_focused: bool,
@@ -84,11 +85,25 @@ impl LayoutDemo {
                 footer = Some(ui.button("footer", "Layout follows text"));
             }));
         })?;
+        let root = root.unwrap();
+        let mut activation_handlers = EventHandlers::new(&scene);
+        activation_handlers.set(
+            &scene,
+            &root,
+            EventPhase::Capture,
+            |_, _, intercept: &mut bool| {
+                if *intercept {
+                    EventControl::Consume
+                } else {
+                    EventControl::Continue
+                }
+            },
+        );
         Ok(Self {
             scene,
             tree: LayoutTree::default(),
             raster,
-            root: root.unwrap(),
+            root,
             footer: footer.unwrap(),
             labels,
             scale: None,
@@ -99,6 +114,7 @@ impl LayoutDemo {
             selected: None,
             clipped: false,
             intercept_activation: false,
+            activation_handlers,
             scroll_offset: Point::new(0.0, 0.0),
             scrollbar_drag: None,
             window_focused: true,
@@ -542,18 +558,12 @@ impl LayoutDemo {
         let mut changed = result.changed;
         if let Some(action) = result.activated {
             let mut source = action.source;
-            let dispatch = self
-                .scene
-                .dispatch_event(&action.widget, &mut source, |ctx, _| {
-                    if self.intercept_activation
-                        && ctx.current_target == &self.root
-                        && ctx.phase == EventPhase::Capture
-                    {
-                        EventControl::Consume
-                    } else {
-                        EventControl::Continue
-                    }
-                });
+            let dispatch = self.activation_handlers.dispatch(
+                &self.scene,
+                &action.widget,
+                &mut source,
+                &mut self.intercept_activation,
+            );
             if dispatch.is_some_and(|result| !result.default_prevented) {
                 self.selected = if self.selected.as_ref() == Some(&action.widget) {
                     None
