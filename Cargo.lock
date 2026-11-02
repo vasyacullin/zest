@@ -3319,10 +3319,18 @@ version = "0.1.0"
 dependencies = [
  "taffy",
  "zest-core",
+ "zest-text",
 ]
 
 [[package]]
 name = "zest-layout-demo"
+version = "0.1.0"
+dependencies = [
+ "zest",
+]
+
+[[package]]
+name = "zest-layout-text-demo"
 version = "0.1.0"
 dependencies = [
  "zest",

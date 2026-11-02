@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zest-core", "crates/zest-paint", "crates/zest-gpu", "crates/zest-text", "crates/zest-layout", "demos/headless", "demos/quad", "demos/text", "demos/layout"]
+members = ["crates/zest-core", "crates/zest-paint", "crates/zest-gpu", "crates/zest-text", "crates/zest-layout", "demos/headless", "demos/quad", "demos/text", "demos/layout", "demos/layout-text"]
 exclude = ["examples/gpui", "examples/egui", "examples/imgui", "examples/dear-imgui-rs"]
 resolver = "3"
 
@@ -49,6 +49,7 @@ gpu = ["dep:zest-gpu"]
 text = ["dep:zest-text"]
 text-raster = ["text", "zest-text/raster"]
 layout = ["dep:zest-layout"]
+layout-text = ["layout", "text-raster", "zest-layout/text"]
 
 [lints]
 workspace = true

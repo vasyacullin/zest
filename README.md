@@ -25,6 +25,7 @@ Install Rust 1.95 or newer, then run from this repository root:
 cargo run -p zest-headless
 cargo run -p zest-text-demo
 cargo run -p zest-layout-demo
+cargo run -p zest-layout-text-demo
 cargo run -p zest-quad
 cargo run -p zest-quad -- --smoke
 cargo test --workspace --all-features --locked
@@ -64,7 +65,7 @@ The initial style supports no-wrap rows/columns, auto/pixel/percentage dimension
 alignment. Minimum sizes default to zero. Leaves use the caller's
 `intrinsic_size` for auto content dimensions; nonempty containers measure their
 children. Supply new intrinsic metrics when text, fonts or other content change.
-Font measurement and width-dependent text wrapping are not yet integrated.
+The optional text adapter below adds font-based, width-dependent measurement.
 Scene roots sit inside a private viewport-sized, stretched vertical column.
 
 `sync` walks the complete scene and evaluates the style callback before changing
@@ -90,6 +91,31 @@ bounds, snapshot/cache reuse and explicit conversion of layout bounds into quads
 The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout, scrolling,
 clipping, automatic scene paint extraction and layout-driven input remain future
 work; this is the first layout slice, not a complete widget system.
+
+Enable the facade's `layout-text` feature (or `zest-layout/text`) to connect
+shaped text to Flexbox leaves. Create `TextContent::new(raster.shape(text,
+families, ShapeOptions { font_size, scale })?)`, then call
+`layout.sync_with_text(&scene, |id| (style, optional_text_content))`. Nonempty
+containers cannot contain measured text. `Style::intrinsic_size` remains the
+fallback for leaves without text; ordinary `sync` clears measured text content.
+
+Text measurement receives Taffy's known content dimensions and available width,
+after padding. It uses real line breaking for min/max-content requests and
+reflows for definite widths, including zero. Known dimensions remain fixed.
+The same shaping is reused as a viewport narrows or expands, so paragraph height
+and following siblings adapt without rasterizing glyphs. Cloning `TextContent`
+preserves its identity and retained measurement caches. Shape a replacement
+after text, font/fallback, font size or DPI changes; its new identity invalidates
+the node and dependent sizes. Color changes need no new shape. A measurement
+failure publishes no snapshot and clears placeholder measurement caches before
+retry. `SyncStats::content_changed` counts replacements separately from styles.
+
+`zest-layout-text-demo` embeds the existing licensed demo fonts and checks
+Unicode/RTL wrapping, padding, sibling movement, content replacement and cache
+reuse. The CI workflow includes it. The plain `layout` feature stays free of
+font/shaping dependencies. This adapter measures typography; automatic text
+painting, glyph atlases and width-keyed measurement caches beyond Taffy's own
+cache remain future work.
 
 ## Experimental GPU slice
 
@@ -457,6 +483,17 @@ Enable `zest`'s `text-raster` feature (or `zest-text/raster`) for
 font selection, Unicode shaping, bidi ordering and line wrapping; Swash 0.2.10
 rasterizes monochrome outlines. These dependencies are optional; `text` alone
 retains the small editing-only dependency set. No system fonts are discovered.
+
+`Rasterizer::shape` returns immutable `ShapedText` with resolved fonts and glyphs.
+`shape.measure(MeasureWidth::Definite(width))` returns logical typographic width,
+height and line count; `MinContent` and `MaxContent` use actual line-breaking
+passes. Width includes trailing whitespace and excludes ink overhangs. Measurement
+reflows a cloned layout, preserving the original shaping; it creates no glyph
+masks or RGBA bitmap. Shape options retain font-size/scale limits and the 64 KiB
+text limit; measurement does not consume the bitmap dimension/pixel budget.
+Shapes retain their font data after the rasterizer is dropped. They are
+caller-owned; there is no global shaping cache or automatic font invalidation.
+The current shaping API is part of `text-raster`, including its dependencies.
 
 ```rust
 use zest::text::raster::{RasterOptions, Rasterizer};

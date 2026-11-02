@@ -2,6 +2,7 @@
 //! behind the `gpu` feature. The `text` feature adds a window-independent Unicode
 //! editing model; `text-raster` adds explicit-font paragraph rasterization.
 //! The optional `layout` feature adds retained headless Flexbox scene layout.
+//! `layout-text` connects shaped paragraph measurement to Flexbox leaves.
 //! Scene widgets are not yet connected to rendering.
 //!
 //! ```

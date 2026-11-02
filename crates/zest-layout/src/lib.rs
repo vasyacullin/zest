@@ -21,6 +21,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 mod style;
+#[cfg(feature = "text")]
+mod text;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -28,6 +30,8 @@ use std::{
 };
 pub use style::{Align, Axis, Edges, Justify, Length, Style};
 use taffy::{AvailableSpace, NodeId, TaffyTree};
+#[cfg(feature = "text")]
+pub use text::TextContent;
 use zest_core::{
     Scene, WidgetId,
     geometry::{Logical, Rect, Size},
@@ -41,6 +45,13 @@ pub enum LayoutError {
     },
     InvalidViewport,
     InvalidGeometry(WidgetId),
+    #[cfg(feature = "text")]
+    TextOnContainer(WidgetId),
+    #[cfg(feature = "text")]
+    TextMeasurement {
+        widget: WidgetId,
+        reason: String,
+    },
     Engine(String),
 }
 impl fmt::Display for LayoutError {
@@ -59,6 +70,14 @@ impl fmt::Display for LayoutError {
                 )
             }
             Self::Engine(error) => write!(f, "layout engine: {error}"),
+            #[cfg(feature = "text")]
+            Self::TextOnContainer(widget) => {
+                write!(f, "measured text requires a leaf node: {widget:?}")
+            }
+            #[cfg(feature = "text")]
+            Self::TextMeasurement { widget, reason } => {
+                write!(f, "text measurement for {widget:?}: {reason}")
+            }
         }
     }
 }
@@ -69,6 +88,8 @@ pub struct SyncStats {
     pub created: usize,
     pub removed: usize,
     pub restyled: usize,
+    /// Retained nodes whose measured content identity changed.
+    pub content_changed: usize,
     /// Updated child lists, including the private viewport root.
     pub children_changed: usize,
 }
@@ -121,17 +142,42 @@ struct Entry {
     style: Style,
     parent: Option<WidgetId>,
     children: Vec<WidgetId>,
+    content: NodeContent,
 }
 struct Declaration {
     id: WidgetId,
     style: Style,
     parent: Option<WidgetId>,
     children: Vec<WidgetId>,
+    content: NodeContent,
+}
+#[derive(Clone, Default, PartialEq)]
+enum NodeContent {
+    #[default]
+    Intrinsic,
+    #[cfg(feature = "text")]
+    Text(TextContent),
+}
+struct NodeContext {
+    intrinsic: Size<Logical>,
+    #[cfg(feature = "text")]
+    id: WidgetId,
+    #[cfg(feature = "text")]
+    content: NodeContent,
+}
+fn context(_id: &WidgetId, style: Style, _content: &NodeContent) -> NodeContext {
+    NodeContext {
+        intrinsic: style.intrinsic_size,
+        #[cfg(feature = "text")]
+        id: _id.clone(),
+        #[cfg(feature = "text")]
+        content: _content.clone(),
+    }
 }
 /// One retained layout tree per scene/window. Node IDs and Taffy storage stay
 /// private. The viewport stacks scene roots in a stretched vertical column.
 pub struct LayoutTree {
-    tree: TaffyTree<Size<Logical>>,
+    tree: TaffyTree<NodeContext>,
     root: NodeId,
     entries: HashMap<WidgetId, Entry>,
     roots: Vec<WidgetId>,
@@ -176,6 +222,30 @@ impl LayoutTree {
         scene: &Scene,
         mut style: impl FnMut(&WidgetId) -> Style,
     ) -> Result<SyncStats, LayoutError> {
+        self.sync_inputs(scene, |id| (style(id), NodeContent::Intrinsic))
+    }
+    /// Synchronizes styles and optional shaped text. Only leaves may contain
+    /// text. Reuse TextContent clones for unchanged text so Taffy retains caches.
+    /// Plain sync clears text content and restores intrinsic-size measurement.
+    #[cfg(feature = "text")]
+    pub fn sync_with_text(
+        &mut self,
+        scene: &Scene,
+        mut input: impl FnMut(&WidgetId) -> (Style, Option<TextContent>),
+    ) -> Result<SyncStats, LayoutError> {
+        self.sync_inputs(scene, |id| {
+            let (style, text) = input(id);
+            (
+                style,
+                text.map_or(NodeContent::Intrinsic, NodeContent::Text),
+            )
+        })
+    }
+    fn sync_inputs(
+        &mut self,
+        scene: &Scene,
+        mut input: impl FnMut(&WidgetId) -> (Style, NodeContent),
+    ) -> Result<SyncStats, LayoutError> {
         let mut declarations = Vec::with_capacity(scene.stats().nodes);
         let mut stack: Vec<_> = scene
             .roots()
@@ -184,11 +254,15 @@ impl LayoutTree {
             .map(|id| (id.clone(), None))
             .collect();
         while let Some((id, parent)) = stack.pop() {
-            let style = style(&id);
+            let (style, content) = input(&id);
             if let Some(field) = style.invalid_field() {
                 return Err(LayoutError::InvalidStyle { widget: id, field });
             }
             let children = scene.children(&id).expect("declared scene node").to_vec();
+            #[cfg(feature = "text")]
+            if !children.is_empty() && matches!(content, NodeContent::Text(_)) {
+                return Err(LayoutError::TextOnContainer(id));
+            }
             stack.extend(
                 children
                     .iter()
@@ -200,6 +274,7 @@ impl LayoutTree {
                 style,
                 parent,
                 children,
+                content,
             });
         }
         let retained: HashSet<_> = declarations.iter().map(|d| d.id.clone()).collect();
@@ -213,23 +288,37 @@ impl LayoutTree {
         // After validation, all Taffy operations address privately owned nodes.
         for declaration in &declarations {
             match self.entries.get_mut(&declaration.id) {
-                Some(entry) if entry.style != declaration.style => {
-                    self.tree
-                        .set_style(entry.node, declaration.style.taffy())
-                        .expect("owned layout node");
-                    self.tree
-                        .set_node_context(entry.node, Some(declaration.style.intrinsic_size))
-                        .expect("owned layout node");
+                Some(entry) => {
+                    let restyled = entry.style != declaration.style;
+                    let remeasured = entry.content != declaration.content;
+                    if restyled {
+                        self.tree
+                            .set_style(entry.node, declaration.style.taffy())
+                            .expect("owned layout node");
+                        stats.restyled += 1;
+                    }
+                    if restyled || remeasured {
+                        self.tree
+                            .set_node_context(
+                                entry.node,
+                                Some(context(
+                                    &declaration.id,
+                                    declaration.style,
+                                    &declaration.content,
+                                )),
+                            )
+                            .expect("owned layout node");
+                    }
                     entry.style = declaration.style;
-                    stats.restyled += 1;
+                    entry.content = declaration.content.clone();
+                    stats.content_changed += usize::from(remeasured);
                 }
-                Some(_) => {}
                 None => {
                     let node = self
                         .tree
                         .new_leaf_with_context(
                             declaration.style.taffy(),
-                            declaration.style.intrinsic_size,
+                            context(&declaration.id, declaration.style, &declaration.content),
                         )
                         .expect("new layout node");
                     self.entries.insert(
@@ -239,6 +328,7 @@ impl LayoutTree {
                             style: declaration.style,
                             parent: declaration.parent.clone(),
                             children: Vec::new(),
+                            content: declaration.content.clone(),
                         },
                     );
                     stats.created += 1;
@@ -321,6 +411,8 @@ impl LayoutTree {
             self.viewport = Some(viewport);
         }
         let mut measured_leaves = 0;
+        #[cfg(feature = "text")]
+        let mut measurement_error = None;
         self.tree
             .compute_layout_with_measure(
                 self.root,
@@ -333,9 +425,47 @@ impl LayoutTree {
                         input,
                         style,
                         |_, _| 0.0,
-                        |known, _| {
+                        |known, available| {
                             measured_leaves += 1;
-                            let intrinsic = context.copied().unwrap_or(Size::new(0.0, 0.0));
+                            let intrinsic = context
+                                .as_ref()
+                                .map_or(Size::new(0.0, 0.0), |context| context.intrinsic);
+                            #[cfg(not(feature = "text"))]
+                            let _ = available;
+                            #[cfg(feature = "text")]
+                            if let Some(context) = context
+                                && let NodeContent::Text(text) = &context.content
+                            {
+                                use zest_text::raster::MeasureWidth;
+                                if measurement_error.is_some() {
+                                    return taffy::Size::ZERO;
+                                }
+                                let width = known.width.map_or_else(
+                                    || match available.width {
+                                        AvailableSpace::Definite(width) => {
+                                            MeasureWidth::Definite(width.max(0.0))
+                                        }
+                                        AvailableSpace::MinContent => MeasureWidth::MinContent,
+                                        AvailableSpace::MaxContent => MeasureWidth::MaxContent,
+                                    },
+                                    MeasureWidth::Definite,
+                                );
+                                match text.shaped().measure(width) {
+                                    Ok(size) => {
+                                        return taffy::Size {
+                                            width: known.width.unwrap_or(size.width),
+                                            height: known.height.unwrap_or(size.height),
+                                        };
+                                    }
+                                    Err(error) => {
+                                        measurement_error = Some(LayoutError::TextMeasurement {
+                                            widget: context.id.clone(),
+                                            reason: error.to_string(),
+                                        });
+                                        return taffy::Size::ZERO;
+                                    }
+                                }
+                            }
                             taffy::Size {
                                 width: known.width.unwrap_or(intrinsic.width as f32),
                                 height: known.height.unwrap_or(intrinsic.height as f32),
@@ -345,6 +475,17 @@ impl LayoutTree {
                 },
             )
             .map_err(|error| LayoutError::Engine(error.to_string()))?;
+        #[cfg(feature = "text")]
+        if let Some(error) = measurement_error {
+            // Fallible text measurement must not leave cached placeholder sizes.
+            for entry in self.entries.values() {
+                self.tree.mark_dirty(entry.node).expect("owned layout node");
+            }
+            self.tree
+                .mark_dirty(self.root)
+                .expect("owned viewport node");
+            return Err(error);
+        }
         let mut boxes: Vec<LayoutBox> = Vec::with_capacity(self.order.len());
         let mut index: HashMap<WidgetId, usize> = HashMap::with_capacity(self.order.len());
         for id in &self.order {

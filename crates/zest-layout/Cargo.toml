@@ -10,6 +10,11 @@ publish.workspace = true
 [dependencies]
 zest-core.workspace = true
 taffy.workspace = true
+zest-text = { workspace = true, features = ["raster"], optional = true }
+
+[features]
+default = []
+text = ["dep:zest-text"]
 
 [lints]
 workspace = true

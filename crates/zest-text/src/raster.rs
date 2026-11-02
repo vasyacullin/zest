@@ -2,12 +2,14 @@
 //! fonts are discovered. The white straight-alpha output can be tinted by an
 //! image renderer. This initial path rasterizes a whole paragraph, not an atlas.
 use parley::{
-    Affinity, Alignment, AlignmentOptions, Cursor, FontContext, FontFamilyName, Layout,
-    LayoutContext, PositionedLayoutItem, StyleProperty,
+    Affinity, Alignment, AlignmentOptions, Cursor, FontContext, Layout, LayoutContext,
+    PositionedLayoutItem,
     fontique::{Collection, CollectionOptions},
 };
 use std::{collections::HashSet, fmt, sync::Arc};
+mod measure;
 mod navigation;
+pub use measure::{MeasureWidth, ShapeOptions, ShapedText, TextMeasurement};
 pub use navigation::{LayoutSelection, Navigation, PageDirection, SelectionGranularity};
 use swash::{
     FontRef,
@@ -83,16 +85,13 @@ impl Default for RasterOptions {
 }
 impl RasterOptions {
     fn validate(self) -> Result<(), RasterError> {
-        if !self.font_size.is_finite()
-            || !(0.0..=256.0).contains(&self.font_size)
-            || self.font_size == 0.0
-            || !self.width.is_finite()
+        ShapeOptions {
+            font_size: self.font_size,
+            scale: self.scale,
+        }
+        .validate()?;
+        if !self.width.is_finite()
             || self.width <= 0.0
-            || !self.scale.is_finite()
-            || self.scale <= 0.0
-            || self.scale > 8.0
-            || self.font_size * self.scale > 512.0
-            || self.font_size * self.scale < 1.0
             || self.width * self.scale < 1.0
             || self.width * self.scale > MAX_DIMENSION as f32
         {
@@ -327,27 +326,15 @@ impl Rasterizer {
         options: RasterOptions,
     ) -> Result<Paragraph, RasterError> {
         options.validate()?;
-        if text.len() > MAX_TEXT_BYTES {
-            return Err(RasterError::InputTooLarge);
-        }
-        if families.is_empty() || families.len() > 32 {
-            return Err(RasterError::InvalidOptions);
-        }
-        for name in families {
-            if self.fonts.collection.family_id(name).is_none() {
-                return Err(RasterError::UnknownFamily((*name).to_owned()));
-            }
-        }
-        let names: Vec<_> = families
-            .iter()
-            .map(|name| FontFamilyName::named(name))
-            .collect();
-        let mut builder = self
-            .layout
-            .ranged_builder(&mut self.fonts, text, options.scale, false);
-        builder.push_default(StyleProperty::FontSize(options.font_size));
-        builder.push_default(names.as_slice());
-        let mut layout: Layout<()> = builder.build(text);
+        let shaped = self.shape(
+            text,
+            families,
+            ShapeOptions {
+                font_size: options.font_size,
+                scale: options.scale,
+            },
+        )?;
+        let mut layout = shaped.layout;
         layout.break_all_lines(Some(options.width * options.scale));
         layout.align(Alignment::Start, AlignmentOptions::default());
         if !layout.width().is_finite() || !layout.height().is_finite() {
@@ -461,7 +448,7 @@ impl Rasterizer {
             identity: Arc::new(()),
             bitmap,
             layout,
-            text: text.to_owned(),
+            text: shaped.text,
         })
     }
 }
