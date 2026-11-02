@@ -23,14 +23,31 @@ pub enum EventControl {
     Consume,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct EventContext<'a> {
+    scene: &'a Scene,
     pub target: &'a WidgetId,
     pub current_target: &'a WidgetId,
     pub phase: EventPhase,
     /// True if an earlier handler prevented the default. Later handlers cannot
     /// undo prevention by returning Continue.
     pub default_prevented: bool,
+}
+impl<'a> EventContext<'a> {
+    /// Immutable scene being routed. Queue scene edits for after dispatch.
+    pub fn scene(&self) -> &'a Scene {
+        self.scene
+    }
+}
+impl std::fmt::Debug for EventContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventContext")
+            .field("target", &self.target)
+            .field("current_target", &self.current_target)
+            .field("phase", &self.phase)
+            .field("default_prevented", &self.default_prevented)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,6 +125,7 @@ impl Scene {
             result.target_reached |= phase == EventPhase::Target;
             let control = handler(
                 EventContext {
+                    scene: self,
                     target,
                     current_target: id,
                     phase,

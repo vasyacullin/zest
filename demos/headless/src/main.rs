@@ -1,4 +1,5 @@
 use zest::Scene;
+use zest::commands::SceneCommands;
 use zest::event::{EventControl, EventHandlers, EventPhase};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,12 +67,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(total, 2);
     assert!(dispatch.default_prevented);
     scene.invalidate_paint(&retained);
-    assert_eq!(scene.take_paint_invalidation().widgets, [retained]);
+    assert_eq!(
+        scene.take_paint_invalidation().widgets,
+        std::slice::from_ref(&retained)
+    );
     assert!(!scene.needs_paint());
     println!("Registered button handler updated the application total to {total}.");
     println!(
         "Application visual changes invalidate paint explicitly; draining leaves the scene clean."
     );
+    let mut commands = SceneCommands::new(&scene);
+    scene
+        .dispatch_event(&retained, &mut (), |ctx, _| {
+            if ctx.phase == EventPhase::Target {
+                commands.set_enabled(ctx.scene(), ctx.target, false);
+            }
+            EventControl::Continue
+        })
+        .unwrap();
+    assert!(scene.state(&retained).unwrap().enabled());
+    let stats = commands.apply(&mut scene).unwrap();
+    assert_eq!(stats.applied, 1);
+    assert!(!scene.state(&retained).unwrap().enabled());
+    println!("Deferred scene command applied after dispatch: {stats:?}.");
     println!("Headless demo: run zest-quad for the experimental window/GPU slice.");
     Ok(())
 }

@@ -2,6 +2,7 @@
 use super::*;
 use zest::{
     FocusDirection, Scene, WidgetId,
+    commands::SceneCommands,
     event::{EventControl, EventHandlers, EventPhase},
     geometry::Size,
     input::{ActivationKey, ActivationSource, ActivationState, InputResult},
@@ -9,6 +10,7 @@ use zest::{
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
 mod clip_checks;
+mod command_checks;
 mod diff_checks;
 mod event_checks;
 mod focus_checks;
@@ -37,6 +39,11 @@ struct Label {
     content: Option<TextContent>,
     prepared: Option<Prepared>,
 }
+struct ActivationEffects {
+    intercept: bool,
+    focus_footer: bool,
+    commands: SceneCommands,
+}
 pub(super) struct LayoutDemo {
     scene: Scene,
     tree: LayoutTree,
@@ -52,7 +59,8 @@ pub(super) struct LayoutDemo {
     selected: Option<WidgetId>,
     clipped: bool,
     intercept_activation: bool,
-    activation_handlers: EventHandlers<ActivationSource, bool>,
+    focus_footer: bool,
+    activation_handlers: EventHandlers<ActivationSource, ActivationEffects>,
     scroll_offset: Point<Logical>,
     scrollbar_drag: Option<scrollbar_input::Drag>,
     window_focused: bool,
@@ -96,14 +104,21 @@ impl LayoutDemo {
             &scene,
             &root,
             EventPhase::Capture,
-            |_, _, intercept: &mut bool| {
-                if *intercept {
+            |_, _, effects: &mut ActivationEffects| {
+                if effects.intercept {
                     EventControl::Consume
                 } else {
                     EventControl::Continue
                 }
             },
         );
+        let focus_target = footer.as_ref().unwrap().clone();
+        activation_handlers.set(&scene, &root, EventPhase::Bubble, move |ctx, _, effects| {
+            if effects.focus_footer && !ctx.default_prevented {
+                effects.commands.focus(ctx.scene(), &focus_target);
+            }
+            EventControl::Continue
+        });
         Ok(Self {
             scene,
             tree: LayoutTree::default(),
@@ -119,6 +134,7 @@ impl LayoutDemo {
             selected: None,
             clipped: false,
             intercept_activation: false,
+            focus_footer: false,
             activation_handlers,
             scroll_offset: Point::new(0.0, 0.0),
             scrollbar_drag: None,
@@ -574,11 +590,16 @@ impl LayoutDemo {
         let mut changed = result.changed;
         if let Some(action) = result.activated {
             let mut source = action.source;
+            let mut effects = ActivationEffects {
+                intercept: self.intercept_activation,
+                focus_footer: self.focus_footer,
+                commands: SceneCommands::new(&self.scene),
+            };
             let dispatch = self.activation_handlers.dispatch(
                 &self.scene,
                 &action.widget,
                 &mut source,
-                &mut self.intercept_activation,
+                &mut effects,
             );
             if dispatch.is_some_and(|result| !result.default_prevented) {
                 if let Some(old) = &self.selected {
@@ -591,6 +612,11 @@ impl LayoutDemo {
                     Some(action.widget)
                 };
                 changed = true;
+            }
+            let stats = effects.commands.apply(&mut self.scene).unwrap();
+            if stats.applied != 0 {
+                changed |= stats.changed;
+                changed |= self.refresh_input();
             }
         }
         changed
@@ -649,6 +675,7 @@ impl LayoutDemo {
                     | winit::keyboard::NamedKey::F3
                     | winit::keyboard::NamedKey::F4
                     | winit::keyboard::NamedKey::F6
+                    | winit::keyboard::NamedKey::F7
             )
         ) || matches!(key, winit::keyboard::Key::Character(value) if value == " ");
         let single_press = matches!(
@@ -659,6 +686,7 @@ impl LayoutDemo {
                     | winit::keyboard::NamedKey::F3
                     | winit::keyboard::NamedKey::F4
                     | winit::keyboard::NamedKey::F6
+                    | winit::keyboard::NamedKey::F7
             )
         );
         let cancelled =
@@ -684,6 +712,14 @@ impl LayoutDemo {
                 return false;
             }
             self.intercept_activation = !self.intercept_activation;
+            self.scene.invalidate_paint(&self.root);
+            return true;
+        }
+        if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F7) {
+            if !pressed || repeat || self.unsupported_modifiers() {
+                return false;
+            }
+            self.focus_footer = !self.focus_footer;
             self.scene.invalidate_paint(&self.root);
             return true;
         }
@@ -783,6 +819,20 @@ impl LayoutDemo {
                                 bounds.size.height.min(2.0),
                             ),
                             color: [1.0, 0.4, 0.05, 1.0],
+                        })?;
+                    }
+                    if self.focus_footer
+                        && let Some(bounds) = snapshot.visible_bounds(&self.root)
+                    {
+                        let height = bounds.size.height.min(2.0);
+                        painter.quad(Quad {
+                            bounds: Rect::from_xywh(
+                                bounds.origin.x,
+                                bounds.origin.y + bounds.size.height - height,
+                                bounds.size.width,
+                                height,
+                            ),
+                            color: [0.1, 0.8, 1.0, 1.0],
                         })?;
                     }
                     for node in snapshot.boxes() {
@@ -973,6 +1023,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     paint_checks::check(&mut demo, renderer)?;
     diff_checks::check(&mut demo, renderer)?;
     paint_cache_checks::check(&mut demo, renderer)?;
+    command_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -1024,6 +1075,8 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
     )
 }
 
+#[cfg(test)]
+mod command_tests;
 #[cfg(test)]
 mod event_tests;
 #[cfg(test)]

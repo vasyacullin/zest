@@ -22,6 +22,7 @@ pub(super) struct PaintKey {
     selected: Option<WidgetId>,
     modal_root: Option<WidgetId>,
     intercept: bool,
+    focus_footer: bool,
     scrollbar: Option<(ScrollbarGeometry, bool, bool)>,
 }
 impl LayoutDemo {
@@ -66,6 +67,7 @@ impl LayoutDemo {
             selected: self.selected.clone(),
             modal_root: self.scene.modal_root().cloned(),
             intercept: self.intercept_activation,
+            focus_footer: self.focus_footer,
             scrollbar: self.scrollbar().map(|bar| {
                 let dragging = self.scrollbar_dragging();
                 (bar, !dragging && self.scrollbar_hovered(), dragging)

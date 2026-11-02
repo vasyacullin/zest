@@ -304,6 +304,10 @@ F6 lets the column intercept child activations and marks its top edge orange.
 Clicks and Enter/Space still show press/focus feedback, but their selection action
 is prevented. F6 restores normal activation. An F3 modal scope excludes the outer
 column from its event route, so activation inside that scope still works.
+F7 lets the column move focus to the footer after an allowed child activation,
+marking its bottom edge cyan. Selection still applies to the originally activated
+node before focus changes. Prevented activations and modal routes that exclude the
+column do not schedule this focus change. F7 restores normal focus behavior.
 Text/IME editing remains in the default demo. Esc closes the layout window when
 neither a modal scope nor a scrollbar drag is active.
 The raster bitmap budgets still apply. Layout smoke uses controlled input replay
@@ -344,6 +348,7 @@ and keyboard selection actions.
 Handlers may mutate application state and the typed payload while borrowing the
 scene immutably. Record reconciliation/focus changes as intents and apply them
 after dispatch. Nested dispatches have independent propagation/default state.
+`EventContext::scene()` exposes the routed scene for read-only queries and command binding.
 Each dispatch reads the current hierarchy; a recreated key addresses its new node.
 Validate queued/stale input separately: `ActivationState` checks gesture generations,
 and positional targeting requires current geometry. Routing does not automatically
@@ -371,6 +376,28 @@ cannot bind or dispatch; pruning a foreign scene leaves the registry unchanged.
 The registry is mutably borrowed during dispatch, so change bindings and apply
 scene edits afterward. Independent registries can handle different event types;
 recursive dispatch through the same registry is not supported.
+
+`zest::commands::SceneCommands::new(&scene)` collects scene edits for after event
+dispatch. Queue `focus`, `set_enabled`, `push_modal` or `invalidate_paint` with the
+scene and target ID; unknown/foreign targets return false without appending.
+Bindings capture exact entity generations when queued. Keyed reorder/label changes
+retain them; deleted/recreated nodes are skipped. `clear_focus()` and `pop_modal()`
+are scene-wide intents applied to the current focus/stack, without a saved target.
+These methods only enqueue; use `apply(&mut scene)` to execute in insertion order.
+Earlier commands can change later eligibility (enable then focus, push then pop).
+Commands obey the existing focus, availability and modal rules at application time.
+
+`apply` returns `Some(CommandStats { applied, skipped, changed })` and drains its
+owner's queue. Accepted no-ops count as applied; stale/rejected commands count as
+skipped. `changed` includes local availability changes even under disabled ancestors.
+Applying to a foreign scene returns None and retains the entire queue. `len`,
+`is_empty` and `clear` inspect/discard pending intents. The queue is ordered, not
+transactional, and does not rebuild declarations, run layout/hit testing or render.
+After applying, reconcile input controllers and refresh geometry/eligibility before
+the next dependent input. The demo applies its F7 bubble handler's focus intent
+after dispatch and the original selection default, then refreshes input. Queueing
+is independent of default prevention: handlers must explicitly choose whether
+their intents should run when the event default was prevented.
 
 `Scene::needs_paint()` reports pending scene appearance or structural changes.
 `paint_invalidation()` returns a non-consuming `PaintInvalidation` snapshot:
