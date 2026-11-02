@@ -13,6 +13,7 @@ use winit::{
 use zest::{
     geometry::{Logical, Point, Rect, ScaleFactor},
     gpu::{Capture, Quad, RenderStatus, Renderer},
+    paint::{DisplayList, PaintError},
 };
 
 static LOG_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -79,8 +80,25 @@ impl App {
                 [0.6, 0.85, 0.04, 1.0]
             },
         };
-        match renderer.render(quad, scale)? {
-            RenderStatus::Presented => self.frames += 1,
+        // The first two smoke frames exercise clear-only encoding in both slots
+        // before either slot has allocated a vertex/upload buffer.
+        let clear_only = self.smoke && self.frames < 2;
+        let list = if clear_only {
+            DisplayList::default()
+        } else {
+            demo_list(self.hovered)?
+        };
+        match renderer.render_list(&list, scale)? {
+            RenderStatus::Presented => {
+                let stats = renderer.last_frame_stats();
+                if stats.draw_calls != u32::from(!list.is_empty()) || stats.quads != list.len() {
+                    return Err("batch draw counters disagree with the display list".into());
+                }
+                if clear_only && (stats.uploaded_bytes != 0 || stats.vertex_capacity != 0) {
+                    return Err("clear-only frame allocated or uploaded vertex data".into());
+                }
+                self.frames += 1;
+            }
             RenderStatus::NeedsResize => {
                 let size = window.inner_size();
                 renderer.resize(size.width, size.height)?;
@@ -104,8 +122,11 @@ impl App {
             }
             if self.frames >= 20 && self.zero_checked && self.resize_observed {
                 renderer.wait_idle()?;
-                let capture = check_pixels(renderer)?;
+                check_pixels(renderer)?;
+                check_batch_pixels(renderer)?;
                 if let Some(path) = &self.capture_path {
+                    let size = window.inner_size();
+                    let capture = renderer.capture_list(&list, scale, size.width, size.height)?;
                     use std::io::Write;
                     let mut file = std::fs::File::create(path)?;
                     write!(file, "P6\n{} {}\n255\n", capture.width, capture.height)?;
@@ -123,6 +144,122 @@ impl App {
         }
         Ok(())
     }
+}
+
+fn demo_list(hovered: bool) -> Result<DisplayList, PaintError> {
+    DisplayList::build(|p| {
+        p.quad(Quad {
+            bounds: BOUNDS,
+            color: if hovered {
+                [0.95, 0.7, 0.08, 1.0]
+            } else {
+                [0.6, 0.85, 0.04, 1.0]
+            },
+        })?;
+        p.with_clip(Rect::from_xywh(320.0, 48.0, 300.0, 220.0), |p| {
+            p.quad(Quad {
+                bounds: Rect::from_xywh(300.0, 32.0, 360.0, 260.0),
+                color: [0.035, 0.055, 0.09, 1.0],
+            })?;
+            p.with_clip(Rect::from_xywh(336.0, 64.0, 260.0, 180.0), |p| {
+                for i in 0..5 {
+                    p.quad(Quad {
+                        bounds: Rect::from_xywh(
+                            310.0 + f64::from(i) * 52.0,
+                            70.0 + f64::from(i) * 22.0,
+                            100.0,
+                            72.0,
+                        ),
+                        color: [0.05, 0.25 + i as f32 * 0.1, 0.9, 0.75],
+                    })?;
+                }
+                Ok(())
+            })
+        })?;
+        p.quad(Quad {
+            bounds: Rect::from_xywh(192.0, 124.0, 160.0, 108.0),
+            color: [0.05, 0.25, 0.9, 0.65],
+        })
+    })
+}
+
+fn expect_pixel(
+    image: &Capture,
+    x: u32,
+    y: u32,
+    expected: [u8; 4],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let offset = ((y * image.width + x) * 4) as usize;
+    let pixel = &image.rgba8[offset..offset + 4];
+    if pixel.iter().zip(expected).any(|(&a, b)| a.abs_diff(b) > 2) {
+        return Err(format!("batch pixel ({x},{y}): got {pixel:?}, expected {expected:?}").into());
+    }
+    Ok(())
+}
+
+fn check_batch_pixels(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::Error>> {
+    let full = Rect::from_xywh(0.0, 0.0, 67.0, 63.0);
+    let list = DisplayList::build(|p| {
+        for _ in 0..128 {
+            p.quad(Quad {
+                bounds: full,
+                color: [1.0, 0.0, 0.0, 1.0],
+            })?;
+        }
+        p.with_clip(Rect::from_xywh(8.0, 8.0, 24.0, 24.0), |p| {
+            p.with_clip(Rect::from_xywh(16.0, 0.0, 24.0, 48.0), |p| {
+                p.quad(Quad {
+                    bounds: full,
+                    color: [0.0, 0.0, 1.0, 0.5],
+                })
+            })
+        })
+    })?;
+    let image = renderer.capture_list(&list, ScaleFactor::default(), 67, 63)?;
+    for (x, y) in [(16, 8), (31, 31), (20, 20)] {
+        expect_pixel(&image, x, y, [188, 0, 188, 255])?;
+    }
+    for (x, y) in [(15, 20), (32, 20), (20, 7), (20, 32), (60, 60)] {
+        expect_pixel(&image, x, y, [255, 0, 0, 255])?;
+    }
+    let grown = renderer.last_frame_stats();
+    if grown.quads != 129
+        || grown.draw_calls != 1
+        || grown.uploaded_bytes != 129 * 144
+        || grown.vertex_capacity < grown.uploaded_bytes
+    {
+        return Err("batch growth or draw counters are incorrect".into());
+    }
+    let reversed = DisplayList::build(|p| {
+        for &quad in list.quads().iter().rev() {
+            p.quad(quad)?;
+        }
+        Ok(())
+    })?;
+    let image = renderer.capture_list(&reversed, ScaleFactor::default(), 67, 63)?;
+    expect_pixel(&image, 20, 20, [255, 0, 0, 255])?;
+    let empty = renderer.capture_list(&DisplayList::default(), ScaleFactor::default(), 67, 63)?;
+    for y in 0..63 {
+        for x in 0..67 {
+            expect_pixel(&empty, x, y, [33, 39, 48, 255])?;
+        }
+    }
+    let stats = renderer.last_frame_stats();
+    if stats.draw_calls != 0
+        || stats.uploaded_bytes != 0
+        || stats.vertex_capacity != grown.vertex_capacity
+    {
+        return Err("clear-only capture changed or uploaded the retained vertex buffer".into());
+    }
+    let image = renderer.capture_list(&list, ScaleFactor::default(), 67, 63)?;
+    expect_pixel(&image, 20, 20, [188, 0, 188, 255])?;
+    if renderer.last_frame_stats().vertex_capacity != grown.vertex_capacity {
+        return Err("steady batch failed to reuse grown buffers".into());
+    }
+    println!(
+        "GPU batch checks passed: 129 quads/one draw, nested clipping, reversed painter order, buffer growth/reuse and clear-only frames"
+    );
+    Ok(())
 }
 
 fn check_pixels(renderer: &mut Renderer) -> Result<Capture, Box<dyn std::error::Error>> {

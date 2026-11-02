@@ -1,7 +1,8 @@
 //! All HAL unsafety lives here. The wrapper owns every resource and the window,
 //! serializes queue access, and waits before recycling or destroying GPU data.
 use crate::{
-    Capture, Quad, RenderError, RenderStatus, SurfaceWindow, VERTEX_BYTES, error, vertices,
+    Capture, FrameStats, Quad, RenderError, RenderStatus, SurfaceWindow, VERTEX_BYTES, error,
+    vertices,
 };
 use std::{
     borrow::{Borrow, Cow},
@@ -48,6 +49,7 @@ struct Frame<A: hal::Api> {
     target: Option<A::Texture>,
     readback: Option<A::Buffer>,
     submitted: u64,
+    capacity: u64,
     initialized: bool,
 }
 impl<A: hal::Api> Default for Frame<A> {
@@ -61,6 +63,7 @@ impl<A: hal::Api> Default for Frame<A> {
             target: None,
             readback: None,
             submitted: 0,
+            capacity: 0,
             initialized: false,
         }
     }
@@ -89,6 +92,7 @@ struct State<A: hal::Api> {
     failed: bool,
     next_value: u64,
     frame_index: usize,
+    last_stats: FrameStats,
 }
 
 pub(crate) struct Gpu<A: hal::Api> {
@@ -228,6 +232,7 @@ impl<A: hal::Api> Gpu<A> {
                 failed: false,
                 next_value: 1,
                 frame_index: 0,
+                last_stats: FrameStats::default(),
             })),
         };
         gpu.state.as_mut().unwrap().initialize()?;
@@ -238,6 +243,9 @@ impl<A: hal::Api> Gpu<A> {
     pub(crate) fn adapter_name(&self) -> &str {
         &self.state.as_ref().unwrap().adapter_name
     }
+    pub(crate) fn last_frame_stats(&self) -> FrameStats {
+        self.state.as_ref().unwrap().last_stats
+    }
     pub(crate) fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         self.state.as_mut().unwrap().resize(width, height)
     }
@@ -246,7 +254,7 @@ impl<A: hal::Api> Gpu<A> {
     }
     pub(crate) fn render(
         &mut self,
-        quad: Quad,
+        quads: &[Quad],
         scale: ScaleFactor,
     ) -> Result<RenderStatus, RenderError> {
         let state = self.state.as_mut().unwrap();
@@ -260,10 +268,11 @@ impl<A: hal::Api> Gpu<A> {
             return Ok(RenderStatus::Suspended);
         }
         let bytes = vertices(
-            quad,
+            quads,
             scale,
             state.config.extent.width,
             state.config.extent.height,
+            state.max_buffer_size,
         )?;
         let result = state.render(&bytes);
         if result.is_err() {
@@ -274,7 +283,7 @@ impl<A: hal::Api> Gpu<A> {
 
     pub(crate) fn capture(
         &mut self,
-        quad: Quad,
+        quads: &[Quad],
         scale: ScaleFactor,
         width: u32,
         height: u32,
@@ -293,7 +302,7 @@ impl<A: hal::Api> Gpu<A> {
                 "nonzero dimensions within adapter limits are required",
             ));
         }
-        let bytes = vertices(quad, scale, width, height)?;
+        let bytes = vertices(quads, scale, width, height, state.max_buffer_size)?;
         let result = state.capture(&bytes, width, height);
         if result.is_err() {
             state.failed = true;
@@ -306,7 +315,7 @@ impl<A: hal::Api> State<A> {
     fn initialize(&mut self) -> Result<(), RenderError> {
         let naga_shader = shader()?;
         // SAFETY: all descriptors are fixed and match the validated WGSL: two
-        // vertex attributes, no bindings, six 24-byte vertices and one sRGB target.
+        // vertex attributes, no bindings, 24-byte vertices and one sRGB target.
         // Each successful allocation is stored immediately for failure cleanup.
         unsafe {
             self.shader = Some(
@@ -387,26 +396,6 @@ impl<A: hal::Api> State<A> {
                         })
                         .map_err(|e| error("encoder", e))?,
                 );
-                frame.upload = Some(
-                    self.device
-                        .create_buffer(&hal::BufferDescriptor {
-                            label: Some("quad upload"),
-                            size: VERTEX_BYTES as u64,
-                            usage: wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
-                            memory_flags: hal::MemoryFlags::PREFER_COHERENT,
-                        })
-                        .map_err(|e| error("upload buffer", e))?,
-                );
-                frame.vertex = Some(
-                    self.device
-                        .create_buffer(&hal::BufferDescriptor {
-                            label: Some("quad vertices"),
-                            size: VERTEX_BYTES as u64,
-                            usage: wgt::BufferUses::COPY_DST | wgt::BufferUses::VERTEX,
-                            memory_flags: hal::MemoryFlags::empty(),
-                        })
-                        .map_err(|e| error("vertex buffer", e))?,
-                );
             }
         }
         Ok(())
@@ -437,6 +426,65 @@ impl<A: hal::Api> State<A> {
             }
         }
         frame.submitted = 0;
+    }
+
+    // Caller has waited for this slot and reclaimed its commands and views.
+    fn prepare_frame(&mut self, index: usize, bytes: &[u8]) -> Result<(), RenderError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let frame = &mut self.frames[index];
+        let size = bytes.len() as u64;
+        // SAFETY: CPU generation checked size/vertex limits and 4-byte alignment.
+        // No GPU accesses remain for this slot. New buffers reset usage tracking;
+        // growing both together prevents stale COPY_SRC/VERTEX state assumptions.
+        unsafe {
+            if size > frame.capacity {
+                if let Some(buffer) = frame.vertex.take() {
+                    self.device.destroy_buffer(buffer);
+                }
+                if let Some(buffer) = frame.upload.take() {
+                    self.device.destroy_buffer(buffer);
+                }
+                frame.initialized = false;
+                let capacity = size.next_power_of_two().min(self.max_buffer_size);
+                frame.upload = Some(
+                    self.device
+                        .create_buffer(&hal::BufferDescriptor {
+                            label: Some("batch upload"),
+                            size: capacity,
+                            usage: wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
+                            memory_flags: hal::MemoryFlags::PREFER_COHERENT,
+                        })
+                        .map_err(|e| error("upload buffer", e))?,
+                );
+                frame.vertex = Some(
+                    self.device
+                        .create_buffer(&hal::BufferDescriptor {
+                            label: Some("batch vertices"),
+                            size: capacity,
+                            usage: wgt::BufferUses::COPY_DST | wgt::BufferUses::VERTEX,
+                            memory_flags: hal::MemoryFlags::empty(),
+                        })
+                        .map_err(|e| error("vertex buffer", e))?,
+                );
+                frame.capacity = capacity;
+            }
+            // The nonzero write range fits capacity. Flush covers all writes on
+            // noncoherent memory; the pointer is not used after unmapping.
+            let upload = frame.upload.as_ref().unwrap();
+            let mapping = self
+                .device
+                .map_buffer(upload, 0..size)
+                .map_err(|e| error("map upload", e))?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
+            if !mapping.is_coherent {
+                self.device
+                    .flush_mapped_ranges(upload, std::iter::once(0..size));
+            }
+            self.device.unmap_buffer(upload);
+        }
+        Ok(())
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
@@ -474,7 +522,7 @@ impl<A: hal::Api> State<A> {
         Ok(())
     }
 
-    fn render(&mut self, bytes: &[u8; VERTEX_BYTES]) -> Result<RenderStatus, RenderError> {
+    fn render(&mut self, bytes: &[u8]) -> Result<RenderStatus, RenderError> {
         let index = self.frame_index;
         let fence = self.fence.as_ref().unwrap();
         let submitted = self.frames[index].submitted;
@@ -487,23 +535,8 @@ impl<A: hal::Api> State<A> {
             }
         }
         self.recycle(index);
+        self.prepare_frame(index, bytes)?;
         let frame = &mut self.frames[index];
-        let upload = frame.upload.as_ref().unwrap();
-        // SAFETY: this slot has completed; no GPU accesses overlap the CPU
-        // write. The nonzero full buffer range is writable, flush covers all
-        // bytes on noncoherent memory, and no pointer survives unmapping.
-        unsafe {
-            let mapping = self
-                .device
-                .map_buffer(upload, 0..VERTEX_BYTES as u64)
-                .map_err(|e| error("map upload", e))?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), VERTEX_BYTES);
-            if !mapping.is_coherent {
-                self.device
-                    .flush_mapped_ranges(upload, std::iter::once(0..VERTEX_BYTES as u64));
-            }
-            self.device.unmap_buffer(upload);
-        }
         let fence = self.fence.as_ref().unwrap();
         let value = self.next_value;
         let next = value
@@ -551,6 +584,7 @@ impl<A: hal::Api> State<A> {
             acquired.texture.borrow(),
             self.pipeline.as_ref().unwrap(),
             self.config.extent,
+            bytes.len(),
             None,
         ) {
             // SAFETY: encoding failed and was discarded; texture is not presented.
@@ -577,22 +611,19 @@ impl<A: hal::Api> State<A> {
             return Err(error("queue submit", e));
         }
         frame.submitted = value;
-        frame.initialized = true;
+        frame.initialized |= !bytes.is_empty();
+        let stats = batch_stats(bytes, frame.capacity);
         self.next_value = next;
         self.frame_index = (index + 1) % self.frames.len();
         // SAFETY: texture was submitted above in PRESENT state; this consumes
         // the sole acquisition. Queue access is serialized by &mut self.
         unsafe { self.queue.present(&self.surface, acquired.texture) }
             .map_err(|e| error("present", e))?;
+        self.last_stats = stats;
         Ok(RenderStatus::Presented)
     }
 
-    fn capture(
-        &mut self,
-        bytes: &[u8; VERTEX_BYTES],
-        width: u32,
-        height: u32,
-    ) -> Result<Capture, RenderError> {
+    fn capture(&mut self, bytes: &[u8], width: u32, height: u32) -> Result<Capture, RenderError> {
         let pitch =
             (u64::from(width) * 4).div_ceil(self.copy_pitch_alignment) * self.copy_pitch_alignment;
         let size = pitch * u64::from(height);
@@ -603,6 +634,7 @@ impl<A: hal::Api> State<A> {
         self.wait_idle()?;
         let index = self.frame_index;
         self.recycle(index);
+        self.prepare_frame(index, bytes)?;
         let frame = &mut self.frames[index];
         let extent = wgt::Extent3d {
             width,
@@ -655,18 +687,6 @@ impl<A: hal::Api> State<A> {
                     })
                     .map_err(|e| error("readback buffer", e))?,
             );
-            // Queue idle/recycle guarantee no GPU use of this upload allocation.
-            let upload = frame.upload.as_ref().unwrap();
-            let mapping = self
-                .device
-                .map_buffer(upload, 0..VERTEX_BYTES as u64)
-                .map_err(|e| error("capture upload", e))?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), VERTEX_BYTES);
-            if !mapping.is_coherent {
-                self.device
-                    .flush_mapped_ranges(upload, std::iter::once(0..VERTEX_BYTES as u64));
-            }
-            self.device.unmap_buffer(upload);
         }
         // Split borrows: target/readback stay owned in this slot throughout GPU use.
         let target = frame.target.take().unwrap();
@@ -676,6 +696,7 @@ impl<A: hal::Api> State<A> {
             &target,
             self.pipeline.as_ref().unwrap(),
             extent,
+            bytes.len(),
             Some((&readback, pitch)),
         );
         frame.target = Some(target);
@@ -690,7 +711,7 @@ impl<A: hal::Api> State<A> {
         }
         .map_err(|e| error("capture submit", e))?;
         frame.submitted = value;
-        frame.initialized = true;
+        frame.initialized |= !bytes.is_empty();
         self.next_value = next;
         // SAFETY: waits for the submission above before reading GPU writes.
         let completed = unsafe { self.device.wait(fence, value, None) }
@@ -727,6 +748,7 @@ impl<A: hal::Api> State<A> {
             }
         }
         self.recycle(index);
+        self.last_stats = batch_stats(bytes, self.frames[index].capacity);
         Ok(Capture {
             width,
             height,
@@ -771,11 +793,21 @@ impl<A: hal::Api> State<A> {
     }
 }
 
+fn batch_stats(bytes: &[u8], capacity: u64) -> FrameStats {
+    FrameStats {
+        quads: bytes.len() / VERTEX_BYTES,
+        draw_calls: u32::from(!bytes.is_empty()),
+        uploaded_bytes: bytes.len() as u64,
+        vertex_capacity: capacity,
+    }
+}
+
 fn encode<A: hal::Api>(
     frame: &mut Frame<A>,
     target: &A::Texture,
     pipeline: &A::RenderPipeline,
     extent: wgt::Extent3d,
+    byte_len: usize,
     readback: Option<(&A::Buffer, u32)>,
 ) -> Result<(), RenderError> {
     let encoder = frame.encoder.as_mut().unwrap();
@@ -783,53 +815,55 @@ fn encode<A: hal::Api>(
     // completion. Every barrier matches our tracked per-slot resource usage.
     unsafe { encoder.begin_encoding(Some("Zest quad frame")) }
         .map_err(|e| error("begin encoding", e))?;
-    // SAFETY: fixed buffer sizes/offsets, COPY_SRC/COPY_DST usage and aligned
-    // 144-byte copy. Render pass uses a live matching view, one sample and no
-    // depth. Six vertices fit the binding exactly. No bindings or indices exist.
+    // SAFETY: checked buffer sizes/offsets, COPY_SRC/COPY_DST usage, aligned
+    // copies. Render pass uses a live matching view, one sample and no depth.
+    // The complete batch fits the binding. No bindings or indices exist.
     let result = unsafe {
-        encoder.transition_buffers(
-            [
-                hal::BufferBarrier {
-                    buffer: frame.upload.as_ref().unwrap(),
-                    usage: hal::StateTransition {
-                        from: if frame.initialized {
-                            wgt::BufferUses::COPY_SRC
-                        } else {
-                            wgt::BufferUses::empty()
+        if byte_len != 0 {
+            encoder.transition_buffers(
+                [
+                    hal::BufferBarrier {
+                        buffer: frame.upload.as_ref().unwrap(),
+                        usage: hal::StateTransition {
+                            from: if frame.initialized {
+                                wgt::BufferUses::COPY_SRC
+                            } else {
+                                wgt::BufferUses::empty()
+                            },
+                            to: wgt::BufferUses::COPY_SRC,
                         },
-                        to: wgt::BufferUses::COPY_SRC,
                     },
-                },
-                hal::BufferBarrier {
-                    buffer: frame.vertex.as_ref().unwrap(),
-                    usage: hal::StateTransition {
-                        from: if frame.initialized {
-                            wgt::BufferUses::VERTEX
-                        } else {
-                            wgt::BufferUses::empty()
+                    hal::BufferBarrier {
+                        buffer: frame.vertex.as_ref().unwrap(),
+                        usage: hal::StateTransition {
+                            from: if frame.initialized {
+                                wgt::BufferUses::VERTEX
+                            } else {
+                                wgt::BufferUses::empty()
+                            },
+                            to: wgt::BufferUses::COPY_DST,
                         },
-                        to: wgt::BufferUses::COPY_DST,
                     },
+                ]
+                .into_iter(),
+            );
+            encoder.copy_buffer_to_buffer(
+                frame.upload.as_ref().unwrap(),
+                frame.vertex.as_ref().unwrap(),
+                std::iter::once(hal::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: NonZeroU64::new(byte_len as u64).unwrap(),
+                }),
+            );
+            encoder.transition_buffers(std::iter::once(hal::BufferBarrier {
+                buffer: frame.vertex.as_ref().unwrap(),
+                usage: hal::StateTransition {
+                    from: wgt::BufferUses::COPY_DST,
+                    to: wgt::BufferUses::VERTEX,
                 },
-            ]
-            .into_iter(),
-        );
-        encoder.copy_buffer_to_buffer(
-            frame.upload.as_ref().unwrap(),
-            frame.vertex.as_ref().unwrap(),
-            std::iter::once(hal::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: NonZeroU64::new(VERTEX_BYTES as u64).unwrap(),
-            }),
-        );
-        encoder.transition_buffers(std::iter::once(hal::BufferBarrier {
-            buffer: frame.vertex.as_ref().unwrap(),
-            usage: hal::StateTransition {
-                from: wgt::BufferUses::COPY_DST,
-                to: wgt::BufferUses::VERTEX,
-            },
-        }));
+            }));
+        }
         encoder.transition_textures(std::iter::once(hal::TextureBarrier {
             texture: target,
             range: wgt::ImageSubresourceRange::default(),
@@ -881,15 +915,17 @@ fn encode<A: hal::Api>(
                     w: extent.width,
                     h: extent.height,
                 });
-                encoder.set_vertex_buffer(
-                    0,
-                    hal::BufferBinding::new_unchecked(
-                        frame.vertex.as_ref().unwrap(),
+                if byte_len != 0 {
+                    encoder.set_vertex_buffer(
                         0,
-                        NonZeroU64::new(VERTEX_BYTES as u64),
-                    ),
-                );
-                encoder.draw(0, 6, 0, 1);
+                        hal::BufferBinding::new_unchecked(
+                            frame.vertex.as_ref().unwrap(),
+                            0,
+                            NonZeroU64::new(byte_len as u64),
+                        ),
+                    );
+                    encoder.draw(0, (byte_len / 24) as u32, 0, 1);
+                }
                 encoder.end_render_pass();
                 encoder.transition_textures(std::iter::once(hal::TextureBarrier {
                     texture: target,

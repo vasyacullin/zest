@@ -2744,6 +2744,7 @@ version = "0.1.0"
 dependencies = [
  "zest-core",
  "zest-gpu",
+ "zest-paint",
 ]
 
 [[package]]
@@ -2762,6 +2763,7 @@ dependencies = [
  "wgpu-hal",
  "wgpu-types",
  "zest-core",
+ "zest-paint",
 ]
 
 [[package]]
@@ -2769,6 +2771,13 @@ name = "zest-headless"
 version = "0.1.0"
 dependencies = [
  "zest",
+]
+
+[[package]]
+name = "zest-paint"
+version = "0.1.0"
+dependencies = [
+ "zest-core",
 ]
 
 [[package]]

@@ -1,11 +1,14 @@
-//! Experimental direct HAL renderer: one colored quad, two reusable frame slots.
-//! Vulkan on Windows/Linux; Metal on Apple targets. There is no widget renderer,
+//! Experimental direct HAL quad batches with two reusable frame slots.
+//! Vulkan on Windows/Linux; Metal on Apple targets. Display lists use one draw
+//! with painter order and CPU rectangular clipping. There is no widget renderer,
 //! text, texture sampling, device recovery or backend fallback yet.
 #![deny(unsafe_code)]
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{fmt, marker::PhantomData, rc::Rc, sync::Arc};
-use zest_core::geometry::{Logical, Rect, ScaleFactor};
+use zest_core::geometry::ScaleFactor;
+use zest_paint::DisplayList;
+pub use zest_paint::Quad;
 
 #[allow(unsafe_code)]
 mod backend;
@@ -27,20 +30,22 @@ pub(crate) fn error(stage: &str, cause: impl fmt::Display) -> RenderError {
     RenderError(format!("{stage}: {cause}"))
 }
 
-/// Coordinates are logical window pixels. Color is straight-alpha linear RGBA
-/// in [0, 1]; it is premultiplied before upload to the sRGB render target.
-#[derive(Clone, Copy, Debug)]
-pub struct Quad {
-    pub bounds: Rect<Logical>,
-    pub color: [f32; 4],
-}
-
 /// Packed, top-to-bottom sRGB RGBA8 pixels from an offscreen render.
 #[derive(Clone, Debug)]
 pub struct Capture {
     pub width: u32,
     pub height: u32,
     pub rgba8: Vec<u8>,
+}
+
+/// CPU counters for the last successful presentation or offscreen capture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameStats {
+    pub quads: usize,
+    pub draw_calls: u32,
+    pub uploaded_bytes: u64,
+    /// Capacity in bytes of the selected slot, retained until growth or drop.
+    pub vertex_capacity: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +90,9 @@ impl Renderer {
     pub fn adapter_name(&self) -> &str {
         self.inner.adapter_name()
     }
+    pub fn last_frame_stats(&self) -> FrameStats {
+        self.inner.last_frame_stats()
+    }
 
     /// Waits for queued rendering/presentation before replacing the swapchain.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
@@ -92,7 +100,17 @@ impl Renderer {
     }
 
     pub fn render(&mut self, quad: Quad, scale: ScaleFactor) -> Result<RenderStatus, RenderError> {
-        self.inner.render(quad, scale)
+        self.inner.render(&[quad], scale)
+    }
+
+    /// One draw for the ordered solid-color quad batch. An empty list clears
+    /// the target without uploading vertices or issuing a draw.
+    pub fn render_list(
+        &mut self,
+        list: &DisplayList,
+        scale: ScaleFactor,
+    ) -> Result<RenderStatus, RenderError> {
+        self.inner.render(list.quads(), scale)
     }
 
     /// Includes pending presentation; useful for a bounded smoke test or shutdown.
@@ -110,29 +128,55 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Capture, RenderError> {
-        self.inner.capture(quad, scale, width, height)
+        self.inner.capture(&[quad], scale, width, height)
+    }
+
+    /// Offscreen counterpart to `render_list`, with synchronous RGBA8 readback.
+    pub fn capture_list(
+        &mut self,
+        list: &DisplayList,
+        scale: ScaleFactor,
+        width: u32,
+        height: u32,
+    ) -> Result<Capture, RenderError> {
+        self.inner.capture(list.quads(), scale, width, height)
     }
 }
 
 const VERTEX_BYTES: usize = 6 * 6 * size_of::<f32>();
 
 fn vertices(
+    quads: &[Quad],
+    scale: ScaleFactor,
+    width: u32,
+    height: u32,
+    max_bytes: u64,
+) -> Result<Vec<u8>, RenderError> {
+    if width == 0 || height == 0 {
+        return Err(error("batch", "nonzero target dimensions are required"));
+    }
+    let len = quads
+        .len()
+        .checked_mul(VERTEX_BYTES)
+        .filter(|len| *len as u64 <= max_bytes && *len / 24 <= u32::MAX as usize)
+        .ok_or_else(|| error("batch", "vertex data exceeds adapter buffer or draw limits"))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|e| error("vertex allocation", e))?;
+    for &quad in quads {
+        bytes.extend_from_slice(&quad_vertices(quad, scale, width, height)?);
+    }
+    Ok(bytes)
+}
+
+fn quad_vertices(
     quad: Quad,
     scale: ScaleFactor,
     width: u32,
     height: u32,
 ) -> Result<[u8; VERTEX_BYTES], RenderError> {
-    if quad.bounds.is_empty()
-        || quad
-            .color
-            .iter()
-            .any(|c| !c.is_finite() || !(0.0..=1.0).contains(c))
-    {
-        return Err(error(
-            "quad",
-            "finite, nonempty bounds and RGBA in [0, 1] are required",
-        ));
-    }
+    quad.validate().map_err(|e| error("quad", e))?;
     let rect = quad.bounds.to_physical(scale);
     let x0 = (2.0 * rect.origin.x / f64::from(width) - 1.0) as f32;
     let x1 = (2.0 * (rect.origin.x + rect.size.width) / f64::from(width) - 1.0) as f32;
@@ -161,6 +205,7 @@ fn vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zest_core::geometry::Rect;
     fn quad() -> Quad {
         Quad {
             bounds: Rect::from_xywh(0.0, 0.0, 100.0, 50.0),
@@ -169,7 +214,7 @@ mod tests {
     }
     #[test]
     fn dpi_coordinates_and_premultiplied_vertex_layout() {
-        let bytes = vertices(quad(), ScaleFactor::new(1.5).unwrap(), 300, 150).unwrap();
+        let bytes = vertices(&[quad()], ScaleFactor::new(1.5).unwrap(), 300, 150, 4096).unwrap();
         let floats: Vec<_> = bytes
             .chunks_exact(4)
             .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
@@ -182,7 +227,7 @@ mod tests {
         for value in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
             let mut q = quad();
             q.color[0] = value;
-            assert!(vertices(q, ScaleFactor::default(), 100, 100).is_err());
+            assert!(vertices(&[q], ScaleFactor::default(), 100, 100, 4096).is_err());
         }
         for rect in [
             Rect::from_xywh(0.0, 0.0, 0.0, 1.0),
@@ -190,18 +235,38 @@ mod tests {
         ] {
             assert!(
                 vertices(
-                    Quad {
+                    &[Quad {
                         bounds: rect,
                         ..quad()
-                    },
+                    }],
                     ScaleFactor::default(),
                     100,
-                    100
+                    100,
+                    4096
                 )
                 .is_err()
             );
         }
-        assert!(vertices(quad(), ScaleFactor::default(), 0, 0).is_err());
+        assert!(vertices(&[quad()], ScaleFactor::default(), 0, 0, 4096).is_err());
+    }
+    #[test]
+    fn batches_preserve_vertex_order_and_check_limits_before_upload() {
+        let second = Quad {
+            color: [0.0, 0.0, 1.0, 1.0],
+            ..quad()
+        };
+        let scale = ScaleFactor::default();
+        let data = vertices(&[quad(), second], scale, 100, 100, 4096).unwrap();
+        assert_eq!(
+            &data[..VERTEX_BYTES],
+            quad_vertices(quad(), scale, 100, 100).unwrap()
+        );
+        assert_eq!(
+            &data[VERTEX_BYTES..],
+            quad_vertices(second, scale, 100, 100).unwrap()
+        );
+        assert!(vertices(&[quad(), second], scale, 100, 100, VERTEX_BYTES as u64).is_err());
+        assert!(vertices(&[], scale, 100, 100, 0).unwrap().is_empty());
     }
     #[test]
     fn shipped_wgsl_is_valid() {

@@ -16,3 +16,4 @@ pub use zest_core::{
 };
 #[cfg(feature = "gpu")]
 pub use zest_gpu as gpu;
+pub use zest_paint as paint;

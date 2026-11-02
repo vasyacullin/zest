@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 zest-core.workspace = true
+zest-paint.workspace = true
 naga.workspace = true
 wgpu-types.workspace = true
 raw-window-handle.workspace = true
