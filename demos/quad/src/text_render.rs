@@ -11,11 +11,15 @@ use zest::{
     paint::Painter,
     text::{
         Selection,
-        raster::{LayoutSelection, Paragraph, RasterOptions, Rasterizer, TextRect},
+        raster::{
+            LayoutSelection, Paragraph, RasterOptions, Rasterizer, SelectionGranularity, TextRect,
+        },
     },
 };
 
+mod clicks;
 mod page_checks;
+mod pointer_checks;
 
 const FAMILIES: &[&str] = &["Noto Sans", "Noto Sans Arabic"];
 const SAMPLE: &str = "Zest • Привет, мир!\noffice e\u{301} • العربية";
@@ -28,6 +32,7 @@ const VIEW: Rect<Logical> = Rect::from_xywh(300.0, 280.0, VIEW_WIDTH, VIEW_HEIGH
 struct Drag {
     anchor: LayoutSelection,
     pointer: Point<Logical>,
+    granularity: SelectionGranularity,
 }
 
 struct StagedInput {
@@ -47,6 +52,7 @@ pub(super) struct TextDemo {
     follow_caret: bool,
     drag: Option<Drag>,
     navigation: Option<LayoutSelection>,
+    clicks: clicks::ClickSequence,
 }
 impl TextDemo {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -66,13 +72,14 @@ impl TextDemo {
             follow_caret: true,
             drag: None,
             navigation: None,
+            clicks: clicks::ClickSequence::default(),
         })
     }
     pub fn reset(&mut self) {
         self.image = None;
         self.uploaded = false;
         self.input.focus(false);
-        self.end_drag();
+        self.cancel_pointer();
         self.follow_caret = true;
         self.navigation = None;
     }
@@ -92,6 +99,7 @@ impl TextDemo {
             self.uploaded = false;
             self.navigation = None;
             self.drag = None;
+            self.clicks.reset();
         }
         Ok(())
     }
@@ -139,6 +147,7 @@ impl TextDemo {
             self.paragraph = paragraph;
             self.uploaded = false;
             self.drag = None;
+            self.clicks.reset();
         }
         self.input = staged.input;
         if staged.follow_caret {
@@ -206,6 +215,9 @@ impl TextDemo {
         pressed: bool,
         synthetic: bool,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
+        if pressed && !synthetic {
+            self.clicks.reset();
+        }
         let result = self.edit(|input| input.key(key, text, pressed, synthetic))?;
         self.finish_key(result)
     }
@@ -217,6 +229,9 @@ impl TextDemo {
         pressed: bool,
         synthetic: bool,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
+        if pressed && !synthetic {
+            self.clicks.reset();
+        }
         let result =
             self.edit(|input| input.key_physical(key, physical, text, pressed, synthetic))?;
         self.finish_key(result)
@@ -278,6 +293,14 @@ impl TextDemo {
         Ok(result)
     }
     pub fn ime(&mut self, ime: &Ime) -> Result<bool, Box<dyn std::error::Error>> {
+        // Toggling native IME after a pointer press must not break a multi-click
+        // sequence. Actual composition/editing does interrupt it.
+        if self.input.buffer.preedit().is_some()
+            || matches!(ime, Ime::Commit(_))
+            || matches!(ime, Ime::Preedit(text, _) if !text.is_empty())
+        {
+            self.clicks.reset();
+        }
         let changed = self.edit(|input| input.ime(ime))?;
         if matches!(ime, Ime::Preedit(text, _) if !text.is_empty()) || matches!(ime, Ime::Commit(_))
         {
@@ -286,6 +309,7 @@ impl TextDemo {
         Ok(changed)
     }
     pub fn focus(&mut self, focused: bool) -> bool {
+        self.clicks.reset();
         let composing = self.input.buffer.preedit().is_some();
         let changed = self.input.focus(focused);
         if !focused {
@@ -300,6 +324,7 @@ impl TextDemo {
         self.input.modifiers = modifiers;
     }
     pub fn cancel_composition(&mut self) {
+        self.clicks.reset();
         let changed = self.input.cancel_composition();
         self.follow_caret |= changed;
         if changed {
@@ -311,6 +336,37 @@ impl TextDemo {
         &mut self,
         point: Point<Logical>,
         extend: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.clicks.reset();
+        self.begin_drag_granularity(point, extend, SelectionGranularity::Grapheme)
+    }
+    pub fn pointer_press(
+        &mut self,
+        point: Point<Logical>,
+        extend: bool,
+        now: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return Err(zest::text::raster::RasterError::InvalidOptions.into());
+        }
+        let mut clicks = self.clicks.clone();
+        if self.input.buffer.preedit().is_some() {
+            clicks.reset();
+        }
+        let granularity = clicks.press(point, now, extend);
+        let result = self.begin_drag_granularity(point, extend, granularity);
+        if result.is_ok() {
+            self.clicks = clicks;
+        } else {
+            self.clicks.reset();
+        }
+        result
+    }
+    fn begin_drag_granularity(
+        &mut self,
+        point: Point<Logical>,
+        extend: bool,
+        granularity: SelectionGranularity,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !point.x.is_finite() || !point.y.is_finite() {
             return Err(zest::text::raster::RasterError::InvalidOptions.into());
@@ -332,12 +388,13 @@ impl TextDemo {
         } else {
             None
         };
-        let selection = self.pointer_selection(point, anchor.as_ref())?;
+        let selection = self.pointer_selection(point, anchor.as_ref(), granularity)?;
         self.input.buffer.set_selection(selection.selection())?;
         self.navigation = Some(selection.clone());
         self.drag = Some(Drag {
             anchor: selection,
             pointer: point,
+            granularity,
         });
         self.follow_caret = false;
         Ok(())
@@ -346,6 +403,7 @@ impl TextDemo {
         &self,
         point: Point<Logical>,
         anchor: Option<&LayoutSelection>,
+        granularity: SelectionGranularity,
     ) -> Result<LayoutSelection, zest::text::raster::RasterError> {
         if !point.x.is_finite() || !point.y.is_finite() {
             return Err(zest::text::raster::RasterError::InvalidOptions);
@@ -361,15 +419,20 @@ impl TextDemo {
             - VIEW.origin.y
             + self.scroll_y;
         match anchor {
-            Some(anchor) => self.paragraph.extend_selection(anchor, x, y),
-            None => self.paragraph.selection_at(x, y),
+            Some(anchor) => self
+                .paragraph
+                .extend_selection_granularity(anchor, x, y, granularity),
+            None => self.paragraph.selection_at_granularity(x, y, granularity),
         }
     }
     pub fn drag_to(&mut self, point: Point<Logical>) -> Result<bool, Box<dyn std::error::Error>> {
+        if point.x.is_finite() && point.y.is_finite() {
+            self.clicks.moved(point);
+        }
         let Some(drag) = self.drag.clone() else {
             return Ok(false);
         };
-        let selection = self.pointer_selection(point, Some(&drag.anchor))?;
+        let selection = self.pointer_selection(point, Some(&drag.anchor), drag.granularity)?;
         let visual_changed = self
             .current_navigation()
             .is_none_or(|old| !old.same_position(&selection));
@@ -384,6 +447,10 @@ impl TextDemo {
     }
     pub fn end_drag(&mut self) {
         self.drag = None;
+    }
+    pub fn cancel_pointer(&mut self) {
+        self.end_drag();
+        self.clicks.reset();
     }
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
@@ -421,6 +488,7 @@ impl TextDemo {
         if !x.is_finite() || !y.is_finite() || (x == 0.0 && y == 0.0) {
             return Ok(false);
         }
+        self.clicks.reset();
         if self.input.modifiers.shift_key() && x == 0.0 {
             x = y;
             y = 0.0;
@@ -1129,6 +1197,7 @@ pub(super) fn check_editor(renderer: &mut Renderer) -> Result<(), Box<dyn std::e
         [255; 4],
     )?;
     page_checks::check(&mut editor, renderer)?;
+    pointer_checks::check(&mut editor, renderer)?;
     renderer.remove_image(editor.image.unwrap())?;
     renderer.wait_idle()?;
     if renderer.image_stats().live != live || renderer.image_stats().retired != 0 {

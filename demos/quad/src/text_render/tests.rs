@@ -3,6 +3,183 @@ use crate::clipboard::MemoryClipboard;
 use winit::dpi::PhysicalPosition;
 
 #[test]
+fn multi_clicks_select_words_and_lines_and_preserve_history_through_native_ime_toggles() {
+    let mut editor = editor("one two three\nnext");
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(0)))
+        .unwrap();
+    editor.update_view().unwrap();
+    let point = at(&editor, 5);
+    let now = Instant::now();
+    let history = editor.input.buffer.history_stats();
+    editor.uploaded = true;
+    for (tick, expected) in [
+        (0, Selection::caret(5)),
+        (100, Selection::new(4, 7)),
+        (200, Selection::new(0, 14)),
+        (300, Selection::caret(5)),
+    ] {
+        editor
+            .pointer_press(point, false, now + Duration::from_millis(tick))
+            .unwrap();
+        assert_eq!(editor.input.buffer.selection(), expected);
+        editor.end_drag();
+        editor.ime(&Ime::Disabled).unwrap();
+        editor.ime(&Ime::Enabled).unwrap();
+        editor.ime(&Ime::Preedit("".into(), None)).unwrap();
+    }
+    assert!(editor.uploaded);
+    assert_eq!(editor.input.buffer.history_stats(), history);
+}
+
+#[test]
+fn word_and_line_drags_keep_complete_initial_units_when_crossing_them() {
+    let mut editor = editor("one two three\nnext");
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(0)))
+        .unwrap();
+    editor.update_view().unwrap();
+    let now = Instant::now();
+    let point = at(&editor, 5);
+    editor.pointer_press(point, false, now).unwrap();
+    editor.end_drag();
+    editor
+        .pointer_press(point, false, now + Duration::from_millis(100))
+        .unwrap();
+    editor.drag_to(at(&editor, 8)).unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(4, 13));
+    editor.drag_to(at(&editor, 0)).unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(7, 0));
+    editor.drag_to(point).unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(4, 7));
+    editor.end_drag();
+    // A completed drag moved outside the click tolerance, starting a new series.
+    for tick in [300, 400, 500] {
+        editor
+            .pointer_press(point, false, now + Duration::from_millis(tick))
+            .unwrap();
+        editor.end_drag();
+    }
+    assert_eq!(editor.input.buffer.selection(), Selection::new(0, 14));
+    editor
+        .pointer_press(point, false, now + Duration::from_millis(1000))
+        .unwrap();
+    editor.end_drag();
+    editor
+        .pointer_press(point, false, now + Duration::from_millis(1100))
+        .unwrap();
+    editor.end_drag();
+    editor
+        .pointer_press(point, false, now + Duration::from_millis(1200))
+        .unwrap();
+    editor.drag_to(at(&editor, 15)).unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(0, 18));
+}
+
+#[test]
+fn multi_click_sequences_reset_on_keyboard_wheel_focus_layout_and_pointer_cancel() {
+    let mut editor = editor("one two");
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(0)))
+        .unwrap();
+    editor.update_view().unwrap();
+    let now = Instant::now();
+    for action in 0..6 {
+        let point = at(&editor, 5);
+        let time = now + Duration::from_secs(action * 2);
+        editor.pointer_press(point, false, time).unwrap();
+        editor.end_drag();
+        match action {
+            0 => {
+                editor
+                    .key(&Key::Named(NamedKey::ArrowLeft), None, true, false)
+                    .unwrap();
+            }
+            1 => {
+                editor
+                    .wheel(
+                        MouseScrollDelta::LineDelta(0.0, 1.0),
+                        ScaleFactor::default(),
+                    )
+                    .unwrap();
+            }
+            2 => {
+                editor.focus(false);
+                editor.focus(true);
+            }
+            3 => {
+                editor.refresh(1.25).unwrap();
+            }
+            4 => {
+                editor.cancel_pointer();
+            }
+            _ => {
+                editor.ime(&Ime::Enabled).unwrap();
+                editor.ime(&Ime::Preedit("é".into(), None)).unwrap();
+            }
+        }
+        editor
+            .pointer_press(point, false, time + Duration::from_millis(100))
+            .unwrap();
+        assert!(
+            editor.input.buffer.selection().is_caret(),
+            "action {action}"
+        );
+        editor.end_drag();
+        let before = editor.input.buffer.selection();
+        assert!(
+            editor
+                .pointer_press(Point::new(f64::NAN, 290.0), false, time)
+                .is_err()
+        );
+        assert_eq!(editor.input.buffer.selection(), before);
+    }
+}
+
+#[test]
+fn shift_click_stays_precise_and_word_drag_autoscroll_retains_granularity() {
+    let mut editor = editor(&"one two three\n".repeat(12));
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(0)))
+        .unwrap();
+    editor.update_view().unwrap();
+    let point = at(&editor, 5);
+    let now = Instant::now();
+    editor.pointer_press(point, false, now).unwrap();
+    editor.end_drag();
+    editor
+        .pointer_press(point, false, now + Duration::from_millis(100))
+        .unwrap();
+    editor.end_drag();
+    editor
+        .pointer_press(at(&editor, 8), true, now + Duration::from_millis(200))
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(4, 8));
+    editor.end_drag();
+    editor
+        .pointer_press(point, false, now + Duration::from_secs(2))
+        .unwrap();
+    editor.end_drag();
+    editor
+        .pointer_press(point, false, now + Duration::from_millis(2100))
+        .unwrap();
+    let history = editor.input.buffer.history_stats();
+    editor.drag_to(Point::new(point.x, 390.0)).unwrap();
+    for _ in 0..12 {
+        editor.drag_scroll(0.05).unwrap();
+    }
+    assert!(editor.scroll_y > 0.0);
+    assert_eq!(editor.input.buffer.selection().anchor, 4);
+    assert_eq!(
+        editor.drag.as_ref().unwrap().granularity,
+        SelectionGranularity::Word
+    );
+    assert_eq!(editor.input.buffer.history_stats(), history);
+    editor.end_drag();
+    assert!(!editor.autoscroll_active());
+}
+
+#[test]
 fn paging_scrolls_with_the_caret_and_preserves_selection_history_and_uploaded_layout() {
     let mut editor = editor(&"abcdefghij\n".repeat(16));
     editor

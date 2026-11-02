@@ -414,7 +414,7 @@ impl ApplicationHandler for App {
             self.demo_image = Some(renderer.upload_rgba8(16, 16, &pixels)?);
             println!("Adapter: {}", renderer.adapter_name());
             println!(
-                "Click/drag to edit; arrows move visually, Up/Down preserve the column, Shift selects. PageUp/PageDown move by viewport height. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
+                "Click/drag to edit; double-click selects words, triple-click selects displayed lines. Arrows move visually, Up/Down preserve the column, Shift selects. PageUp/PageDown move by viewport height. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
             );
             let word_modifier = if cfg!(target_os = "macos") {
                 "Option"
@@ -522,10 +522,11 @@ impl ApplicationHandler for App {
                     .cursor
                     .filter(|&point| text_render::FIELD.contains(point))
                 {
-                    if let Err(error) = self
-                        .text
-                        .begin_drag(point, self.text.input.modifiers.shift_key())
-                    {
+                    if let Err(error) = self.text.pointer_press(
+                        point,
+                        self.text.input.modifiers.shift_key(),
+                        Instant::now(),
+                    ) {
                         eprintln!("Text hit test rejected: {error}");
                     }
                     window.set_ime_allowed(false);
@@ -559,7 +560,7 @@ impl ApplicationHandler for App {
                         Ok(false) => {}
                         Err(error) => {
                             eprintln!("Text scrolling rejected: {error}");
-                            self.text.end_drag();
+                            self.text.cancel_pointer();
                         }
                     }
                 }
@@ -581,7 +582,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 self.cursor = None;
-                self.text.end_drag();
+                self.text.cancel_pointer();
                 self.drag_tick = None;
                 window.request_redraw();
             }
@@ -596,7 +597,7 @@ impl ApplicationHandler for App {
                     Ok(false) => {}
                     Err(error) => {
                         eprintln!("Text drag rejected: {error}");
-                        self.text.end_drag();
+                        self.text.cancel_pointer();
                     }
                 }
                 if hovered != self.hovered {
@@ -606,14 +607,14 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
-                self.text.end_drag();
+                self.text.cancel_pointer();
                 self.drag_tick = None;
                 self.hovered = false;
                 window.request_redraw();
             }
             WindowEvent::Occluded(false) => window.request_redraw(),
             WindowEvent::Occluded(true) => {
-                self.text.end_drag();
+                self.text.cancel_pointer();
                 self.drag_tick = None;
             }
             WindowEvent::RedrawRequested => {
@@ -655,7 +656,7 @@ impl ApplicationHandler for App {
                     Ok(false) => {}
                     Err(error) => {
                         eprintln!("Text autoscroll rejected: {error}");
-                        self.text.end_drag();
+                        self.text.cancel_pointer();
                     }
                 }
             }

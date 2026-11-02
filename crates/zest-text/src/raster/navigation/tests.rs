@@ -317,7 +317,7 @@ fn paragraph(text: &str, width: f32) -> Paragraph {
     paragraph_at_scale(text, width, 1.0)
 }
 
-fn paragraph_at_scale(text: &str, width: f32, scale: f32) -> Paragraph {
+pub(super) fn paragraph_at_scale(text: &str, width: f32, scale: f32) -> Paragraph {
     let mut raster = Rasterizer::new();
     raster
         .register_font(include_bytes!("../../../../../assets/fonts/NotoSans.ttf").to_vec())

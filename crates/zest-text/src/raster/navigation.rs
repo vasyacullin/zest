@@ -1,6 +1,7 @@
 use super::{Affinity, Cursor, Paragraph, RasterError, TextRect};
 use crate::Selection;
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Layout-aware movement; line start/end follow logical text order within the
 /// current displayed line. Left/right follow visual cluster order; word variants
@@ -25,6 +26,16 @@ pub enum Navigation {
 pub enum PageDirection {
     Up,
     Down,
+}
+
+/// Pointer selection units. Line means a displayed row, including its hard
+/// line break if present. Grapheme places a caret at a grapheme boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectionGranularity {
+    #[default]
+    Grapheme,
+    Word,
+    Line,
 }
 
 /// Selection tied to an immutable paragraph snapshot. Retains caret affinity
@@ -69,6 +80,95 @@ impl Paragraph {
     pub fn selection_at(&self, x: f64, y: f64) -> Result<LayoutSelection, RasterError> {
         let cursor = self.point_cursor(x, y)?;
         self.wrap_selection(parley::Selection::new(cursor, cursor))
+    }
+    /// Selects the pointed word or displayed line, snapping range endpoints
+    /// outward so even fallback emoji cannot be partially selected. Coordinates
+    /// are logical pixels. Empty final lines produce a caret.
+    pub fn selection_at_granularity(
+        &self,
+        x: f64,
+        y: f64,
+        granularity: SelectionGranularity,
+    ) -> Result<LayoutSelection, RasterError> {
+        let cursor = self.point_cursor(x, y)?;
+        let range = match granularity {
+            SelectionGranularity::Grapheme => {
+                return self.wrap_selection(parley::Selection::new(cursor, cursor));
+            }
+            SelectionGranularity::Word => parley::Selection::word_from_point(
+                &self.layout,
+                (x * f64::from(self.bitmap.scale)) as f32,
+                (y * f64::from(self.bitmap.scale)) as f32,
+            )
+            .text_range(),
+            SelectionGranularity::Line => {
+                let y = y * f64::from(self.bitmap.scale);
+                let index = self
+                    .layout
+                    .lines()
+                    .position(|line| y < f64::from(line.metrics().block_max_coord))
+                    .unwrap_or(self.layout.len().saturating_sub(1));
+                self.layout
+                    .get(index)
+                    .map(|line| line.text_range())
+                    .unwrap_or(0..0)
+            }
+        };
+        let start = self
+            .text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= range.start)
+            .last()
+            .unwrap_or(0);
+        let start = if range.start == self.text.len() {
+            range.start
+        } else {
+            start
+        };
+        let end = crate::snap_forward(&self.text, range.end);
+        let anchor = Cursor::from_byte_index(&self.layout, start, Affinity::Downstream);
+        let focus = if start == end {
+            anchor
+        } else {
+            Cursor::from_byte_index(&self.layout, end, Affinity::Upstream)
+        };
+        self.wrap_selection(parley::Selection::new(anchor, focus))
+    }
+    /// Extends from the original word/line selection, retaining the complete
+    /// initial unit when crossing it. Pass that same original snapshot state
+    /// throughout a drag. Grapheme mode keeps the ordinary fixed anchor.
+    pub fn extend_selection_granularity(
+        &self,
+        base: &LayoutSelection,
+        x: f64,
+        y: f64,
+        granularity: SelectionGranularity,
+    ) -> Result<LayoutSelection, RasterError> {
+        self.validate_selection(base)?;
+        if granularity == SelectionGranularity::Grapheme {
+            return self.extend_selection(base, x, y);
+        }
+        let target = self.selection_at_granularity(x, y, granularity)?;
+        let ordered = |state: &LayoutSelection| {
+            let anchor = state.inner.anchor();
+            let focus = state.inner.focus();
+            if anchor.index() <= focus.index() {
+                (anchor, focus)
+            } else {
+                (focus, anchor)
+            }
+        };
+        let (base_start, base_end) = ordered(base);
+        let (target_start, target_end) = ordered(&target);
+        let (anchor, focus) = if target_start.index() < base_start.index() {
+            (base_end, target_start)
+        } else if target_end.index() > base_end.index() {
+            (base_start, target_end)
+        } else {
+            (base_start, base_end)
+        };
+        self.wrap_selection(parley::Selection::new(anchor, focus))
     }
     /// Retains the existing anchor while hit testing a new focus. Resets the
     /// vertical goal column, as pointer movement starts a new navigation sequence.
@@ -331,5 +431,7 @@ impl Paragraph {
     }
 }
 
+#[cfg(test)]
+mod pointer_tests;
 #[cfg(test)]
 mod tests;

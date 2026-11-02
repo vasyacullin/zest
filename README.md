@@ -60,7 +60,16 @@ height through displayed lines, retain the desired column and scroll with the
 caret. Shift extends selection. At the first/last line, another outward page
 step reaches the document edge. Ctrl/Alt/Cmd combinations with page keys are
 currently consumed without an action. Click places
-the caret using layout hit testing; Shift+click extends selection. Hold the left
+the caret using layout hit testing; Shift+click extends selection precisely.
+Double-click selects a Unicode word (or punctuation/whitespace segment);
+triple-click selects a displayed line, including its newline when present.
+Dragging after a double/triple-click extends by complete words/lines, retaining
+the whole original unit when crossing it. The demo recognizes successive left
+presses within 500 ms and 4 logical pixels of the first press; the fourth starts
+a new series. These are fixed demo thresholds, independent of OS preferences.
+Moving farther, keyboard input, composition, scrolling, focus/lifecycle changes,
+layout rebuilding or pointer cancellation break the series. Native IME enable/
+disable notifications between clicks preserve it. Hold the left
 button and drag to extend from a fixed anchor, including across graphemes and
 wrapped/RTL runs. Dragging beyond the text viewport scrolls toward that edge
 until release or the document boundary. Releasing the button, leaving the window,
@@ -155,6 +164,9 @@ short lines, trailing empty lines and progression through narrow wrapped bidi
 text. GPU checks verify the caret moves between visual lines even when its byte
 offset is unchanged, page scrolling retains its viewport-relative height, Shift
 page selection paints correctly and navigation reuses the same bitmap/image.
+Controlled-time pointer tests and GPU replay exercise double/triple-click
+selection, whole-word drag reversal, RTL, newline copy and highlight pixels
+without accessing the system clipboard or sleeping between synthetic presses.
 
 `Renderer::capture` and `capture_list` provide synchronous packed sRGB RGBA8 readback for tests and
 screenshots. Ordinary rendering never reads back pixels. Smoke fails on renderer
@@ -435,6 +447,17 @@ endpoint affinities and the horizontal goal for repeated vertical moves.
 `extend_selection` preserves the pointer anchor's affinity. `selection()` gives
 grapheme-aligned model byte offsets. `same_position()` compares visual endpoints,
 not the saved vertical goal column.
+
+`selection_at_granularity(x, y, SelectionGranularity::Word)` selects the pointed
+Unicode word segment; `Line` selects a displayed row including its hard line
+break, and `Grapheme` places a caret. Range endpoints snap outward to extended
+grapheme boundaries. `extend_selection_granularity` takes the original selection
+from the press, coordinates and the same granularity on every drag update; it
+keeps that complete initial word/line when crossing it. Whitespace, punctuation,
+wrapped lines, empty paragraphs and final empty lines have defined selections.
+These operations share the paragraph snapshot/coordinate validation and leave
+the text, history and bitmap untouched. The demo handles click timing in its
+pointer binding; the text library does not read a system clock.
 
 Layout selections belong to one immutable snapshot. Using them with another
 paragraph returns `ForeignSelection`; rebuild them from model offsets after text,
