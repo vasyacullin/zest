@@ -4,16 +4,15 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, WindowEvent},
+    dpi::{LogicalPosition, LogicalSize, PhysicalSize},
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
 use zest::{
     geometry::{Logical, Point, Rect, ScaleFactor},
     gpu::{Backend, Capture, Quad, RenderStatus, Renderer, RendererOptions},
-    paint::{DisplayList, Image, ImageId, PaintError},
+    paint::{DisplayList, Image, ImageId, PaintError, Primitive},
 };
 
 static LOG_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -54,6 +53,7 @@ struct App {
     smoke: bool,
     frames: usize,
     hovered: bool,
+    cursor: Option<Point<Logical>>,
     resized: bool,
     resize_observed: bool,
     zero_checked: bool,
@@ -76,6 +76,15 @@ impl App {
         let scale = ScaleFactor::new(window.scale_factor())?;
         let renderer = self.renderer.as_mut().unwrap();
         self.text.prepare(renderer, window.scale_factor() as f32)?;
+        if self.text.input.focused
+            && self.text.input.ime_enabled
+            && let Some(area) = self.text.ime_area()
+        {
+            window.set_ime_cursor_area(
+                LogicalPosition::new(area.origin.x, area.origin.y),
+                LogicalSize::new(area.size.width, area.size.height),
+            );
+        }
         let quad = Quad {
             bounds: BOUNDS,
             color: if self.hovered {
@@ -95,9 +104,19 @@ impl App {
         match renderer.render_list(&list, scale)? {
             RenderStatus::Presented => {
                 let stats = renderer.last_frame_stats();
-                if stats.draw_calls != if list.is_empty() { 0 } else { 3 }
-                    || stats.quads != list.len()
-                {
+                let mut material = None;
+                let mut draws = 0;
+                for primitive in list.primitives() {
+                    let next = match primitive {
+                        Primitive::Quad(_) => None,
+                        Primitive::Image(image) => Some(image.id),
+                    };
+                    if material != Some(next) {
+                        draws += 1;
+                        material = Some(next);
+                    }
+                }
+                if stats.draw_calls != draws || stats.quads != list.len() {
                     return Err("batch draw counters disagree with the display list".into());
                 }
                 if clear_only && (stats.uploaded_bytes != 0 || stats.vertex_capacity != 0) {
@@ -133,6 +152,7 @@ impl App {
                 image_checks::check(renderer)?;
                 upload_checks::check(renderer)?;
                 self.text.check(renderer)?;
+                text_render::check_editor(renderer)?;
                 if let Some(path) = &self.capture_path {
                     let size = window.inner_size();
                     let capture = renderer.capture_list(&list, scale, size.width, size.height)?;
@@ -392,8 +412,10 @@ impl ApplicationHandler for App {
             self.demo_image = Some(renderer.upload_rgba8(16, 16, &pixels)?);
             println!("Adapter: {}", renderer.adapter_name());
             println!(
-                "Hover the quad; resize the window; Esc closes. Rendering sleeps between events."
+                "Click the text field and type; Shift+arrows select, Ctrl/Cmd+A/Z/Y select/undo/redo. Home/End move to document ends. Esc cancels composition, then closes."
             );
+            self.text.focus(window.has_focus());
+            window.set_ime_allowed(self.text.input.focused);
             window.request_redraw();
             self.window = Some(window);
             self.renderer = Some(renderer);
@@ -407,6 +429,8 @@ impl ApplicationHandler for App {
     fn suspended(&mut self, _events: &ActiveEventLoop) {
         self.renderer = None;
         self.text.reset();
+        self.cursor = None;
+        self.hovered = false;
         self.demo_image = None;
         self.window = None;
     }
@@ -420,11 +444,78 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => events.exit(),
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && event.logical_key == Key::Named(NamedKey::Escape) =>
-            {
-                events.exit()
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                match self.text.key_physical(
+                    &event.logical_key,
+                    event.physical_key,
+                    event.text.as_deref(),
+                    event.state == ElementState::Pressed,
+                    is_synthetic,
+                ) {
+                    Ok(result) => {
+                        if result.close {
+                            events.exit();
+                        }
+                        if result.reset_ime {
+                            window.set_ime_allowed(false);
+                            window.set_ime_allowed(self.text.input.focused);
+                        }
+                        if result.changed {
+                            window.request_redraw();
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("Text input rejected: {error}");
+                        self.text.cancel_composition();
+                        window.set_ime_allowed(false);
+                        window.set_ime_allowed(self.text.input.focused);
+                        window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => self.text.modifiers(modifiers.state()),
+            WindowEvent::Ime(ime) => match self.text.ime(&ime) {
+                Ok(true) => window.request_redraw(),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("IME input rejected: {error}");
+                    self.text.cancel_composition();
+                    window.set_ime_allowed(false);
+                    window.set_ime_allowed(self.text.input.focused);
+                    window.request_redraw();
+                }
+            },
+            WindowEvent::Focused(focused) => {
+                self.text.focus(focused);
+                window.set_ime_allowed(focused);
+                window.request_redraw();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(point) = self
+                    .cursor
+                    .filter(|&point| text_render::FIELD.contains(point))
+                {
+                    if let Err(error) = self
+                        .text
+                        .click(point, self.text.input.modifiers.shift_key())
+                    {
+                        eprintln!("Text hit test rejected: {error}");
+                    }
+                    window.set_ime_allowed(false);
+                    window.set_ime_allowed(true);
+                } else {
+                    self.text.focus(false);
+                    window.set_ime_allowed(false);
+                }
+                window.request_redraw();
             }
             WindowEvent::Resized(size) => {
                 if self.smoke && self.resized && size == PhysicalSize::new(640, 360) {
@@ -447,12 +538,14 @@ impl ApplicationHandler for App {
                     ScaleFactor::new(window.scale_factor()).expect("positive window DPI"),
                 );
                 let hovered = BOUNDS.contains(point);
+                self.cursor = Some(point);
                 if hovered != self.hovered {
                     self.hovered = hovered;
                     window.request_redraw();
                 }
             }
-            WindowEvent::CursorLeft { .. } if self.hovered => {
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor = None;
                 self.hovered = false;
                 window.request_redraw();
             }
@@ -526,6 +619,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         smoke,
         frames: 0,
         hovered: false,
+        cursor: None,
         resized: false,
         resize_observed: false,
         zero_checked: false,
@@ -559,5 +653,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 mod image_checks;
+mod text_input;
 mod text_render;
 mod upload_checks;

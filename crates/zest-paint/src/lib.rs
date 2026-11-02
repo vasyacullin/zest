@@ -214,15 +214,41 @@ impl Painter<'_> {
             },
         };
         let original = image.bounds;
-        image.uv = Rect::from_xywh(
-            image.uv.origin.x
-                + (bounds.origin.x - original.origin.x) / original.size.width * image.uv.size.width,
-            image.uv.origin.y
-                + (bounds.origin.y - original.origin.y) / original.size.height
-                    * image.uv.size.height,
-            bounds.size.width / original.size.width * image.uv.size.width,
-            bounds.size.height / original.size.height * image.uv.size.height,
+        let crop = |start: f64,
+                    length: f64,
+                    source_start: f64,
+                    source_length: f64,
+                    uv_start: f64,
+                    uv_length: f64| {
+            // Intersecting edges and subtracting their origins can round an
+            // unchanged extent upward (24.8 -> 24.80000000000001). Clamp the
+            // normalized edges before mapping, without relaxing input validation.
+            let first = ((start - source_start) / source_length).clamp(0.0, 1.0);
+            let last = ((start + length - source_start) / source_length).clamp(first, 1.0);
+            let a = (uv_start + first * uv_length).clamp(0.0, 1.0);
+            let b = (uv_start + last * uv_length).clamp(a, 1.0);
+            (a, (b - a).min(1.0 - a))
+        };
+        let (u, width) = crop(
+            bounds.origin.x,
+            bounds.size.width,
+            original.origin.x,
+            original.size.width,
+            image.uv.origin.x,
+            image.uv.size.width,
         );
+        let (v, height) = crop(
+            bounds.origin.y,
+            bounds.size.height,
+            original.origin.y,
+            original.size.height,
+            image.uv.origin.y,
+            image.uv.size.height,
+        );
+        if width == 0.0 || height == 0.0 {
+            return Ok(());
+        }
+        image.uv = Rect::from_xywh(u, v, width, height);
         image.bounds = bounds;
         self.list.order.push(Command::Image(self.list.images.len()));
         self.list.images.push(image);
@@ -272,6 +298,39 @@ impl Painter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fractional_image_edges_remain_valid_after_unchanged_and_nested_clips() {
+        let mut source = image();
+        source.bounds = Rect::from_xywh(300.0, 280.0, 19.2, 24.8);
+        let list = DisplayList::build(|p| {
+            p.with_clip(Rect::from_xywh(300.0, 280.0, 320.0, 68.0), |p| {
+                p.image(source)
+            })
+        })
+        .unwrap();
+        let Primitive::Image(clipped) = list.primitives().next().unwrap() else {
+            panic!("image")
+        };
+        clipped.validate().unwrap();
+        assert_eq!(clipped.uv.origin, source.uv.origin);
+        assert!((clipped.uv.size.height - 1.0).abs() < 1e-14);
+        let list = DisplayList::build(|p| {
+            p.with_clip(Rect::from_xywh(304.1, 281.2, 15.1, 23.6), |p| {
+                p.with_clip(Rect::from_xywh(307.3, 282.4, 11.9, 22.4), |p| {
+                    p.image(source)
+                })
+            })
+        })
+        .unwrap();
+        for primitive in list.primitives() {
+            if let Primitive::Image(image) = primitive {
+                image.validate().unwrap();
+            }
+        }
+        let mut invalid = source;
+        invalid.uv.size.height = 1.0001;
+        assert!(DisplayList::build(|p| p.image(invalid)).is_err());
+    }
     fn image() -> Image {
         let mut ids = zest_core::resource::ResourceArena::<ImageResource, _>::default();
         Image::new(ids.insert(()), Rect::from_xywh(0.0, 0.0, 100.0, 80.0))

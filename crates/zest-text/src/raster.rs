@@ -2,8 +2,8 @@
 //! fonts are discovered. The white straight-alpha output can be tinted by an
 //! image renderer. This initial path rasterizes a whole paragraph, not an atlas.
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamilyName, Layout, LayoutContext,
-    PositionedLayoutItem, StyleProperty,
+    Affinity, Alignment, AlignmentOptions, Cursor, FontContext, FontFamilyName, Layout,
+    LayoutContext, PositionedLayoutItem, StyleProperty,
     fontique::{Collection, CollectionOptions},
 };
 use std::{collections::HashSet, fmt};
@@ -27,11 +27,14 @@ pub enum RasterError {
     UnknownFamily(String),
     LayoutTooLarge,
     InvalidRaster,
+    InvalidOffset(usize),
 }
 impl fmt::Display for RasterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidOptions => f.write_str("invalid text size, scale, width or font list"),
+            Self::InvalidOptions => {
+                f.write_str("invalid text size, scale, width, coordinates or font list")
+            }
             Self::InputTooLarge => f.write_str("text exceeds the 64 KiB paragraph limit"),
             Self::FontBudgetExceeded => {
                 f.write_str("registered fonts exceed the 16 MiB input budget")
@@ -43,6 +46,9 @@ impl fmt::Display for RasterError {
             }
             Self::InvalidRaster => {
                 f.write_str("glyph raster has invalid dimensions or mask format")
+            }
+            Self::InvalidOffset(offset) => {
+                write!(f, "invalid paragraph UTF-8 byte offset: {offset}")
             }
         }
     }
@@ -113,6 +119,89 @@ pub struct RasterizedText {
     pub metrics: TextMetrics,
 }
 
+/// Logical rectangle relative to the paragraph origin (not the bitmap origin).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Immutable layout and raster snapshot for one display string. Geometry uses
+/// the same shaped layout as the bitmap, including wrapping and bidi ordering.
+/// Scalar offsets inside a cluster resolve to that cluster's caret geometry.
+pub struct Paragraph {
+    bitmap: RasterizedText,
+    layout: Layout<()>,
+    text: String,
+}
+impl Paragraph {
+    pub fn bitmap(&self) -> &RasterizedText {
+        &self.bitmap
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn into_bitmap(self) -> RasterizedText {
+        self.bitmap
+    }
+    pub fn caret(&self, offset: usize) -> Result<TextRect, RasterError> {
+        self.validate_offset(offset)?;
+        let cursor = Cursor::from_byte_index(&self.layout, offset, Affinity::Downstream);
+        Ok(self.rect(cursor.geometry(&self.layout, self.bitmap.scale)))
+    }
+    pub fn selection_rects(
+        &self,
+        selection: crate::Selection,
+    ) -> Result<Vec<TextRect>, RasterError> {
+        self.validate_offset(selection.anchor)?;
+        self.validate_offset(selection.head)?;
+        let range = selection.range();
+        let selection = parley::Selection::new(
+            Cursor::from_byte_index(&self.layout, range.start, Affinity::Downstream),
+            Cursor::from_byte_index(&self.layout, range.end, Affinity::Upstream),
+        );
+        Ok(selection
+            .geometry(&self.layout)
+            .into_iter()
+            .map(|(rect, _)| self.rect(rect))
+            .collect())
+    }
+    /// Hit tests logical coordinates and snaps forward to an extended grapheme
+    /// boundary accepted by TextBuffer. Affinity at bidi/soft-wrap boundaries
+    /// is canonicalized; visual-arrow navigation is not part of this API yet.
+    pub fn hit_test(&self, x: f64, y: f64) -> Result<usize, RasterError> {
+        let scale = f64::from(self.bitmap.scale);
+        if !x.is_finite()
+            || !y.is_finite()
+            || (x * scale).abs() > f64::from(f32::MAX)
+            || (y * scale).abs() > f64::from(f32::MAX)
+        {
+            return Err(RasterError::InvalidOptions);
+        }
+        let offset =
+            Cursor::from_point(&self.layout, (x * scale) as f32, (y * scale) as f32).index();
+        Ok(crate::snap_forward(&self.text, offset))
+    }
+    fn validate_offset(&self, offset: usize) -> Result<(), RasterError> {
+        if self.text.is_char_boundary(offset) {
+            Ok(())
+        } else {
+            Err(RasterError::InvalidOffset(offset))
+        }
+    }
+    fn rect(&self, rect: parley::BoundingBox) -> TextRect {
+        let scale = f64::from(self.bitmap.scale);
+        TextRect {
+            x: rect.x0 / scale,
+            y: rect.y0 / scale,
+            width: (rect.x1 - rect.x0) / scale,
+            height: (rect.y1 - rect.y0) / scale,
+        }
+    }
+}
+
 /// Owns the explicitly registered fonts and reusable shaping/raster scratch
 /// contexts. Input font bytes are limited to 16 MiB in total; text to 64 KiB per
 /// call; output to 4096 per dimension and 4 Mi pixels. Retained temporary glyph
@@ -175,6 +264,18 @@ impl Rasterizer {
         families: &[&str],
         options: RasterOptions,
     ) -> Result<RasterizedText, RasterError> {
+        self.paragraph(text, families, options)
+            .map(Paragraph::into_bitmap)
+    }
+
+    /// Retains layout for caret, selection and hit testing without re-shaping
+    /// when only the selection changes. Raster limits also apply to snapshots.
+    pub fn paragraph(
+        &mut self,
+        text: &str,
+        families: &[&str],
+        options: RasterOptions,
+    ) -> Result<Paragraph, RasterError> {
         options.validate()?;
         if text.len() > MAX_TEXT_BYTES {
             return Err(RasterError::InputTooLarge);
@@ -297,7 +398,7 @@ impl Rasterizer {
                 pixel.copy_from_slice(&[255, 255, 255, combined as u8]);
             }
         }
-        Ok(RasterizedText {
+        let bitmap = RasterizedText {
             width,
             height,
             origin_x: bounds.left,
@@ -305,6 +406,11 @@ impl Rasterizer {
             scale: options.scale,
             rgba8,
             metrics,
+        };
+        Ok(Paragraph {
+            bitmap,
+            layout,
+            text: text.to_owned(),
         })
     }
 }

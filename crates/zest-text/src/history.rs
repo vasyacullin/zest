@@ -24,7 +24,7 @@ pub struct HistoryStats {
     pub payload_bytes: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Edit {
     pub start: usize,
     pub removed: String,
@@ -38,7 +38,7 @@ impl Edit {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct History {
     pub undo: VecDeque<Edit>,
     pub redo: Vec<Edit>,

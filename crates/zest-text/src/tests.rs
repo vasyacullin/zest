@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn display_selection_projects_preedit_without_changing_document_offsets() {
+    let mut buffer = TextBuffer::new("a OLD z");
+    buffer.set_selection(Selection::new(5, 2)).unwrap();
+    assert_eq!(buffer.display_selection(), Some(Selection::new(5, 2)));
+    buffer
+        .set_preedit("e\u{301}", Some(Selection::new(1, 3)))
+        .unwrap();
+    assert_eq!(buffer.selection(), Selection::new(5, 2));
+    assert_eq!(buffer.display_selection(), Some(Selection::new(3, 5)));
+    assert_eq!(buffer.preedit_range(), Some(2..5));
+    buffer.set_preedit("draft", None).unwrap();
+    assert_eq!(buffer.display_selection(), None);
+    buffer.cancel_preedit();
+    assert_eq!(buffer.preedit_range(), None);
+    assert_eq!(buffer.display_selection(), Some(Selection::new(5, 2)));
+}
+
+#[test]
+fn cloned_buffers_keep_independent_history_selection_and_composition() {
+    let mut buffer = TextBuffer::new("base");
+    buffer.insert("!").unwrap();
+    buffer.set_preedit("draft", None).unwrap();
+    let mut clone = buffer.clone();
+    clone.commit_preedit("é");
+    clone.undo().unwrap();
+    clone.undo().unwrap();
+    assert_eq!(clone.text(), "base");
+    assert_eq!(buffer.text(), "base!");
+    assert_eq!(buffer.display_text(), "base!draft");
+    assert_eq!(buffer.history_stats().undo_edits, 1);
+}
+
+#[test]
 fn movement_and_deletion_treat_unicode_clusters_atomically() {
     let clusters = ["Ж", "e\u{301}", "👩🏽‍💻", "🇯🇵", "\r\n", "日", "ש"];
     let text = clusters.concat();

@@ -1,5 +1,74 @@
 use super::*;
 
+#[test]
+fn snapshot_geometry_uses_logical_coordinates_for_wrapped_and_rtl_text() {
+    let mut raster = rasterizer();
+    let sample = "Привет office\nالعربية e\u{301}";
+    let one = raster
+        .paragraph(
+            sample,
+            FAMILIES,
+            RasterOptions {
+                width: 110.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let dpi = raster
+        .paragraph(
+            sample,
+            FAMILIES,
+            RasterOptions {
+                width: 110.0,
+                scale: 1.5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let a = one.caret(sample.len()).unwrap();
+    let b = dpi.caret(sample.len()).unwrap();
+    assert!((a.x - b.x).abs() < 1.0 && (a.y - b.y).abs() < 1.0);
+    assert!(a.height > 0.0 && a.width > 0.0);
+    let rects = one
+        .selection_rects(crate::Selection::new(sample.len(), 0))
+        .unwrap();
+    assert!(rects.len() >= one.bitmap().metrics.lines);
+    assert!(rects.iter().all(|r| r.width > 0.0 && r.height > 0.0));
+    for (i, _) in sample.char_indices().filter(|(_, c)| !c.is_whitespace()) {
+        assert!(one.caret(i).is_ok());
+    }
+    assert!(one.caret(1).is_err());
+    assert!(one.caret(usize::MAX).is_err());
+    assert!(one.selection_rects(crate::Selection::new(0, 1)).is_err());
+    assert!(one.hit_test(f64::NAN, 0.0).is_err());
+    for y in [-20.0, 0.0, 20.0, 10000.0] {
+        for x in [-20.0, 0.0, 20.0, 10000.0] {
+            let offset = one.hit_test(x, y).unwrap();
+            assert!(crate::boundary(sample, offset));
+        }
+    }
+}
+
+#[test]
+fn empty_paragraph_has_a_caret_and_hit_tests_ligatures_to_grapheme_boundaries() {
+    let mut raster = rasterizer();
+    let blank = raster
+        .paragraph("", FAMILIES, RasterOptions::default())
+        .unwrap();
+    assert!(blank.caret(0).unwrap().height > 0.0);
+    assert_eq!(blank.hit_test(10.0, 10.0).unwrap(), 0);
+    let sample = "fi e\u{301} العربية";
+    let paragraph = raster
+        .paragraph(sample, FAMILIES, RasterOptions::default())
+        .unwrap();
+    for x in 0..200 {
+        assert!(crate::boundary(
+            sample,
+            paragraph.hit_test(f64::from(x), 10.0).unwrap()
+        ));
+    }
+}
+
 const SANS: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans.ttf");
 const ARABIC: &[u8] = include_bytes!("../../../../assets/fonts/NotoSansArabic.ttf");
 const FAMILIES: &[&str] = &["Noto Sans", "Noto Sans Arabic"];

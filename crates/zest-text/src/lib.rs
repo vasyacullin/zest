@@ -109,7 +109,7 @@ impl Preedit {
 /// commit or cancel composition first. An empty preedit cancels it. Each actual
 /// replacement (including an IME commit) is one undo step; there is no typing
 /// coalescing. Line endings and Unicode normalization are preserved verbatim.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TextBuffer {
     text: String,
     selection: Selection,
@@ -158,6 +158,24 @@ impl TextBuffer {
                 Cow::Owned(display)
             }
         }
+    }
+    /// Selection in display-text byte coordinates. During composition this is
+    /// the IME's scalar selection; None means the IME requests a hidden caret.
+    pub fn display_selection(&self) -> Option<Selection> {
+        match &self.preedit {
+            None => Some(self.selection),
+            Some(preedit) => preedit.cursor.map(|cursor| {
+                let start = self.selection.range().start;
+                Selection::new(start + cursor.anchor, start + cursor.head)
+            }),
+        }
+    }
+    /// Range to decorate as preedit, in display-text byte coordinates.
+    pub fn preedit_range(&self) -> Option<Range<usize>> {
+        self.preedit.as_ref().map(|preedit| {
+            let start = self.selection.range().start;
+            start..start + preedit.text.len()
+        })
     }
     pub fn history_stats(&self) -> HistoryStats {
         self.history.stats()

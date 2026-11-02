@@ -12,7 +12,8 @@ The separate GPU slice opens a window and renders ordered, clipped quad batches.
 An optional text model provides Unicode editing, transient IME composition and
 bounded undo/redo. Optional paragraph layout/rasterization renders Latin,
 Cyrillic and Arabic in the GPU demo. Scene widgets are not yet connected to
-rendering; widget layout and OS IME integration are still planned.
+rendering; widget layout is still planned. The window demo now binds the text
+model to keyboard/IME events and paints caret, selection and preedit geometry.
 See [plan.md](plan.md) for the full roadmap and acceptance criteria.
 
 ## Run
@@ -42,6 +43,15 @@ at 30.0.1; the high-level `wgpu` crate is not used.
 The demo renders overlapping quads, a checker texture and text with rectangular clips and changes the
 left quad's color on hover. Resize and DPI events update surface/geometry. Normal
 operation uses an event-driven `Wait` loop, without continuous redraw requests.
+Click the text field to edit, or outside it to release text focus. Use Shift with
+Left/Right for selection, Home/End for document start/end, Enter for a newline,
+Backspace/Delete for grapheme deletion, Ctrl/Cmd+A to select all, Ctrl/Cmd+Z to
+undo, and Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Arrows follow logical string
+order; visual bidi arrows and Up/Down navigation are still pending. Click places
+the caret using layout hit testing; Shift+click extends selection. The viewport
+follows the caret horizontally and vertically. The caret is steady so idle
+rendering stays asleep. Escape cancels an active composition; otherwise it exits.
+Drag selection, wheel scrolling and clipboard actions are not implemented yet.
 Close the window or press Esc to exit. Linux needs a Vulkan driver/loader and
 X11 or Wayland; CI installs the native development libraries listed in its
 workflow. Windows needs a working DX12 or Vulkan driver.
@@ -105,6 +115,12 @@ white coverage textures, and compare every readback pixel to the CPU coverage
 blended on black in linear space (two byte tolerance after sRGB encoding).
 They cover DPI 1/1.25/1.5, clipping and texture retirement. This verifies the
 CPU-to-GPU path; it does not replace independent reference shaping goldens.
+Editor smoke replays the same binding used for real keyboard/IME events, checks
+selection/caret/preedit pixels, verifies that selection changes do not upload
+text again, and exercises IME clear/commit/undo, focus cancellation, caret
+scrolling, candidate-area bounds and texture retirement. Native IME candidate
+windows and actual keyboard layouts still require manual platform testing;
+event replay does not establish their behavior.
 
 `Renderer::capture` and `capture_list` provide synchronous packed sRGB RGBA8 readback for tests and
 screenshots. Ordinary rendering never reads back pixels. Smoke fails on renderer
@@ -236,16 +252,19 @@ Document selections must lie on extended grapheme boundaries. Movement and
 deletion use [unicode-segmentation](https://docs.rs/unicode-segmentation/1.13.3/unicode_segmentation/)
 to keep combining marks, emoji sequences and CRLF together. New carets snap
 forward to a grapheme boundary after an edit merges adjacent clusters. Movement
-is in logical string order; visual bidi arrows, line navigation and hit testing
-require the future layout layer. Text and line endings are preserved verbatim.
+is in logical string order; visual bidi arrows and line navigation remain future
+work. Optional paragraph snapshots provide layout hit testing. Text and line
+endings are preserved verbatim.
 
 Preedit replaces the selected range only in `display_text()`. Its cursor is
 relative to the preedit string and may use any UTF-8 scalar boundary. Invalid
 document/preedit offsets return an error before mutation. During composition,
 document edits, navigation and undo/redo return `CompositionActive`; the host
 must commit or cancel first. An empty preedit cancels it. A commit may differ
-from the last preedit or arrive without one. Platform adapters will be responsible
-for focus changes, IME enablement and candidate-window positioning.
+from the last preedit or arrive without one. `display_selection()` and
+`preedit_range()` project document-relative state into display-string byte offsets;
+a hidden IME cursor returns None. `TextBuffer::clone()` makes an independent
+copy including composition and bounded history, supporting staged edits.
 
 Each actual replacement is one undo step, restoring text and directional
 selection. Cursor-only changes and identical replacements retain redo; a new
@@ -258,7 +277,21 @@ both stacks and their combined payload size.
 
 This initial `String` model scans grapheme boundaries and shifts text during
 edits. It is intended for short UI fields; it has no large-document performance
-claim. Scrolling, clipboard and native IME event routing are not implemented yet.
+claim. Clipboard support is not implemented yet. Winit routing and caret-follow
+scrolling currently live in the demo rather than a public platform/widget API.
+
+The demo routes [winit IME events](https://docs.rs/winit/0.30.13/winit/event/enum.Ime.html),
+enables IME only for text focus, and updates the candidate area from the visible
+caret in logical window coordinates. It handles the empty preedit preceding a
+commit as one text edit. Focus loss, IME disablement and Escape cancel pending
+preedit; late commits are ignored until IME is enabled again. Key releases,
+synthetic focus key events, shortcut payloads and control text are not inserted.
+Ctrl+Alt text remains available for AltGr; Option text remains available on macOS.
+Command shortcuts use physical A/Z/Y positions so switching to a Cyrillic layout
+does not disable selection/undo/redo; ordinary typing uses the event's text payload.
+The binding stages the model/history and paragraph layout before accepting an
+edit. If a raster budget is exceeded, it keeps the last accepted document and
+reports the rejection to stderr; an active native composition is reset.
 
 ## Paragraph shaping and rasterization
 
@@ -296,11 +329,21 @@ requires no readback.
 
 Reuse one rasterizer per coarse UI context and retain the resulting bitmap/GPU
 image until text, fonts, wrapping width or DPI changes. The demo reuses its image
-across redraws and replaces/retires it when DPI changes. This first implementation
+across redraws and replaces/retires it when text or DPI changes. This first implementation
 rebuilds paragraph layout and rasterizes a whole paragraph per call; it has no
 persistent shaping cache or shared GPU glyph atlas. It renders grayscale outlines
-only, without color emoji, text decorations or visual editing/selection geometry.
-The editing model's byte offsets are not yet connected to layout hit testing.
+only, without color emoji or rich text decorations.
+
+`Rasterizer::paragraph` returns an immutable `Paragraph` retaining that same
+layout plus its bitmap. `caret`, `selection_rects` and `hit_test` use logical
+coordinates relative to the paragraph origin. UTF-8 offsets are validated;
+scalar offsets inside a shaped cluster resolve to cluster geometry. Hit testing
+snaps forward to a grapheme boundary accepted by `TextBuffer`. Bidi and soft-wrap
+affinity is canonicalized, so this is not yet a complete visual navigation API.
+The demo projects the editing model's display selection into these snapshots,
+paints selection behind text and preedit underlines/caret above it, and clips
+everything to the field viewport. Selection-only changes reuse the same bitmap
+and GPU image.
 
 Each call accepts at most 64 KiB of text. Registered input font bytes total at
 most 16 MiB. Output is limited to 4096 pixels per dimension and 4 Mi pixels;
