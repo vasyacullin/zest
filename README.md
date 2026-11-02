@@ -90,7 +90,7 @@ measurement calls, rather than total node visits.
 The headless `zest-layout-demo` checks reorder identity, focus/hover, fractional
 bounds, snapshot/cache reuse and explicit conversion of layout bounds into quads.
 The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout, scrolling,
-ancestor clipping, automatic scene paint extraction and general widget event routing remain future
+automatic scene paint extraction and general widget event routing remain future
 work; this is the first layout slice, not a complete widget system.
 
 `LayoutSnapshot::hit_test(point, |id| accepts(id))` finds the last accepted box in
@@ -100,7 +100,34 @@ edges, ignores empty boxes and rejects nonfinite/out-of-viewport points. The
 predicate lets the caller exclude containers, disabled or noninteractive nodes.
 Use freshly computed geometry before positional input; old snapshots remain
 immutable and cannot detect scene edits on their own. This initial path tests
-rectangular bounds and has no ancestor clip chains or transforms.
+rectangular bounds with effective ancestor clips; transforms are not supported.
+
+`Style::clip_children` (default false) intersects descendants' clips with that
+node's border bounds, in logical coordinates. It affects both axes and propagates
+through nonclipping descendants. A nonclipping parent permits overflow; an empty
+clipping parent hides its descendants. Every `LayoutBox::clip` includes the
+viewport and all clipping ancestors. It does not clip the node's own paint to its
+own bounds. Raw `bounds` keep their layout size/position, while
+`LayoutSnapshot::visible_bounds(id)` (also on `LayoutBox`) returns their visible
+intersection, or None for empty/fully clipped/unknown nodes.
+
+Paint each node through the same effective clip used by hit testing:
+
+```rust
+use zest::paint::Quad;
+
+for node in snapshot.boxes() {
+    painter.with_clip(node.clip, |painter| {
+        painter.quad(Quad { bounds: node.bounds, color: [0.1, 0.4, 0.8, 1.0] })
+    })?;
+}
+```
+
+Clipping alone creates a new immutable snapshot without rerunning Taffy or text
+measurement (`ComputeStats::performed == false`). Unchanged clip settings reuse
+the same snapshot. Geometry/style changes still use the normal layout caches.
+Old snapshots retain their original clips. Clipping does not scroll content or
+add rounded masks; applications still filter interaction eligibility themselves.
 
 Enable the facade's `layout-text` feature (or `zest-layout/text`) to connect
 shaped text to Flexbox leaves. Create `TextContent::new(raster.shape(text,
@@ -148,6 +175,11 @@ F3 restricts input to the body label and marks its top edge in amber. Other node
 are dimmed and reject clicks; Tab/Shift+Tab stays in the scope. Esc or F3 closes
 it and restores the previous visible, available focus. F2 disabling the scoped
 label also closes its scope. These shortcuts ignore synthetic/repeated events.
+F4 clips the column to its fixed 96.25-logical-pixel border height, or allows its
+overflow again. Text and the marker keep the same layout bounds and textures.
+Paint, pointer hits, Tab and restored focus use the same effective ancestor clip;
+visible slivers narrower/shorter than one physical pixel are ineligible. Changing
+clips cancels pending gestures and re-hits a stationary pointer before more input.
 Fully clipped or subpixel-sized targets are skipped. Geometry is refreshed before
 pointer/keyboard input, and resize re-hits a stationary pointer. DPI changes discard
 stale pointer coordinates; focus remains on the keyed node while it is visible.

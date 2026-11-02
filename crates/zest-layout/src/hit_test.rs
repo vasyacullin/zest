@@ -7,7 +7,7 @@ impl LayoutSnapshot {
     /// the same layering. Minimum edges belong to a box, maximum edges do not.
     /// The predicate selects interactive/enabled IDs; containers can be excluded.
     /// Uses this immutable snapshot only: compute current geometry before input.
-    /// This initial rectangular path has no ancestor clips or transforms.
+    /// Includes effective rectangular ancestor clips. Transforms are not supported.
     pub fn hit_test(
         &self,
         point: Point<Logical>,
@@ -20,7 +20,9 @@ impl LayoutSnapshot {
         self.boxes()
             .iter()
             .rev()
-            .find(|node| node.bounds.contains(point) && accepts(&node.id))
+            .find(|node| {
+                node.clip.contains(point) && node.bounds.contains(point) && accepts(&node.id)
+            })
             .map(|node| &node.id)
     }
 }
@@ -47,10 +49,12 @@ mod tests {
                 LayoutBox {
                     id: a.clone(),
                     bounds: bounds[0],
+                    clip: Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height),
                 },
                 LayoutBox {
                     id: b.clone(),
                     bounds: bounds[1],
+                    clip: Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height),
                 },
             ],
             index: HashMap::from([(a.clone(), 0), (b.clone(), 1)]),

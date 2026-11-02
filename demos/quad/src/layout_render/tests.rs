@@ -458,3 +458,115 @@ fn clipped_modal_focus_stays_bounded_and_removing_its_root_restores_visible_focu
     assert!(!demo.modal_active());
     assert_eq!(demo.scene.focused(), Some(&title));
 }
+
+#[test]
+fn ancestor_clip_cancels_hidden_pointer_focus_and_preserves_raw_bounds_and_shapes() {
+    let mut demo = demo();
+    let footer = demo.footer.clone();
+    let before = demo.snapshot.as_ref().unwrap().clone();
+    let content = demo.labels[1].content.clone();
+    demo.pointer_moved(center(&demo, &footer));
+    demo.pointer_press();
+    assert!(demo.key(&Key::Named(NamedKey::F4), true, false));
+    assert!(demo.clipped && demo.hovered.is_none() && demo.scene.focused().is_none());
+    assert!(!demo.pointer_release());
+    assert!(!demo.visible(&footer));
+    let after = demo.snapshot.as_ref().unwrap();
+    assert!(!before.same_snapshot(after));
+    for node in before.boxes() {
+        assert_eq!(after.bounds(&node.id), Some(node.bounds));
+    }
+    assert_eq!(demo.labels[1].content, content);
+    assert!(demo.visible(&demo.labels[1].id));
+    assert_eq!(
+        demo.hit(Point::new(34.0, CLIP_HEIGHT - 0.001)),
+        Some(demo.labels[1].id.clone())
+    );
+    assert!(demo.hit(Point::new(34.0, CLIP_HEIGHT)).is_none());
+    for expected in [
+        demo.labels[0].id.clone(),
+        demo.labels[1].id.clone(),
+        demo.labels[0].id.clone(),
+    ] {
+        tab(&mut demo);
+        assert_eq!(demo.scene.focused(), Some(&expected));
+    }
+    demo.key(&Key::Named(NamedKey::F4), true, false);
+    assert!(demo.visible(&footer));
+    assert_eq!(demo.hovered.as_ref(), Some(&footer));
+    assert!(demo.selected.is_none());
+}
+
+#[test]
+fn clip_shortcut_ignores_unfocused_modified_repeated_and_synthetic_events() {
+    let mut demo = demo();
+    let f4 = Key::Named(NamedKey::F4);
+    assert!(!demo.key(&f4, false, false));
+    assert!(!demo.key(&f4, true, true));
+    assert!(!demo.key_event(&f4, true, true, false));
+    demo.modifiers(ModifiersState::CONTROL);
+    assert!(!demo.key(&f4, true, false));
+    demo.focus_window(false);
+    assert!(!demo.key(&f4, true, false));
+    demo.focus_window(true);
+    assert!(demo.key(&f4, true, false));
+    assert!(demo.clipped);
+    assert!(!demo.update_geometry(Size::new(480.0, 450.0), 1.25).unwrap());
+}
+
+#[test]
+fn closing_a_modal_cannot_restore_focus_to_an_ancestor_clipped_widget() {
+    let mut demo = demo();
+    let footer = demo.footer.clone();
+    demo.set_focus(Some(footer));
+    demo.key(&Key::Named(NamedKey::F3), true, false);
+    demo.key(&Key::Named(NamedKey::F4), true, false);
+    assert!(demo.modal_active());
+    assert_eq!(demo.scene.focused(), Some(&demo.labels[1].id));
+    demo.key(&Key::Named(NamedKey::Escape), true, false);
+    assert!(demo.scene.focused().is_none() && !demo.modal_active());
+    demo.key(&Key::Named(NamedKey::F4), true, false);
+    assert!(demo.scene.focused().is_none());
+}
+
+#[test]
+fn subpixel_visible_slivers_are_excluded_from_pointer_and_tab_eligibility() {
+    let mut demo = demo();
+    let old = demo.snapshot.as_ref().unwrap().clone();
+    let body = demo.labels[1].id.clone();
+    let clip_height = old.bounds(&body).unwrap().origin.y + 0.25;
+    demo.tree
+        .sync(&demo.scene, |id| {
+            if id == &demo.root {
+                Style {
+                    width: Length::Px(480.0),
+                    height: Length::Px(clip_height as f32),
+                    padding: Edges::all(24.0),
+                    gap: 16.0,
+                    shrink: 0.0,
+                    clip_children: true,
+                    ..Default::default()
+                }
+            } else {
+                Style {
+                    height: Length::Px(old.bounds(id).unwrap().size.height as f32),
+                    shrink: 0.0,
+                    ..Default::default()
+                }
+            }
+        })
+        .unwrap();
+    demo.snapshot = Some(demo.tree.compute(old.viewport()).unwrap().snapshot);
+    assert!(
+        demo.snapshot
+            .as_ref()
+            .unwrap()
+            .visible_bounds(&body)
+            .is_some()
+    );
+    assert!(!demo.visible(&body));
+    assert!(demo.hit(Point::new(34.0, clip_height - 0.1)).is_none());
+    assert!(tab(&mut demo));
+    assert_eq!(demo.scene.focused(), Some(&demo.labels[0].id));
+    assert!(!tab(&mut demo));
+}

@@ -65,6 +65,9 @@ pub struct Style {
     pub shrink: f32,
     pub align: Align,
     pub justify: Justify,
+    /// Clip descendants to this node's border bounds. Does not change layout or
+    /// clip this node's own paint; viewport/ancestor clips still apply to it.
+    pub clip_children: bool,
 }
 impl Default for Style {
     fn default() -> Self {
@@ -80,6 +83,7 @@ impl Default for Style {
             shrink: 1.0,
             align: Align::Stretch,
             justify: Justify::Start,
+            clip_children: false,
         }
     }
 }
@@ -89,6 +93,15 @@ pub(crate) fn valid_size(size: Size<Logical>) -> bool {
         .all(|value| value.is_finite() && value >= 0.0 && value <= f64::from(f32::MAX))
 }
 impl Style {
+    pub(crate) fn same_layout(self, other: Self) -> bool {
+        Self {
+            clip_children: false,
+            ..self
+        } == Self {
+            clip_children: false,
+            ..other
+        }
+    }
     pub(crate) fn invalid_field(self) -> Option<&'static str> {
         for (field, length) in [("width", self.width), ("height", self.height)] {
             match length {

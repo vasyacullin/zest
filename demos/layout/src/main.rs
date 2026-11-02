@@ -87,9 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .filter(|node| node.id != toolbar)
         {
-            painter.quad(zest::paint::Quad {
-                bounds: node.bounds,
-                color: [0.1, 0.4, 0.8, 1.0],
+            painter.with_clip(node.clip, |painter| {
+                painter.quad(zest::paint::Quad {
+                    bounds: node.bounds,
+                    color: [0.1, 0.4, 0.8, 1.0],
+                })
             })?;
         }
         Ok(())

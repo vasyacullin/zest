@@ -447,7 +447,7 @@ impl ApplicationHandler for App {
                 );
             } else {
                 println!(
-                    "Layout preview: click or Enter/Space toggles selection; Tab/Shift+Tab changes focus. F2 toggles the body label's enabled state. F3 scopes input to the body; Esc restores the previous focus, then closes. Resize reflows text. Text/IME editing is available in the default demo."
+                    "Layout preview: click or Enter/Space toggles selection; Tab/Shift+Tab changes focus. F2 toggles the body label's enabled state. F3 scopes input to the body; Esc restores the previous focus, then closes. F4 clips the column to 96.25 logical pixels. Resize reflows text. Text/IME editing is available in the default demo."
                 );
             }
             self.text.focus(self.layout.is_none() && window.has_focus());
@@ -847,7 +847,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "zest-quad [--layout] [--backend auto|dx12|vulkan|metal] [--smoke] [--capture image.ppm]\n--layout: responsive scene/text layout preview (F2 toggles body; F3 scopes input; Esc unscopes/closes)\n--backend: native API (default auto; explicit choices never fall back)\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
+                    "zest-quad [--layout] [--backend auto|dx12|vulkan|metal] [--smoke] [--capture image.ppm]\n--layout: responsive scene/text layout preview (F2 toggles body; F3 scopes input; F4 clips column; Esc unscopes/closes)\n--backend: native API (default auto; explicit choices never fall back)\n--smoke: 20 presents, resize/suspend and offscreen pixel checks\n--capture: run smoke and save the offscreen image as PPM"
                 );
                 return Ok(());
             }

@@ -7,8 +7,11 @@ use zest::{
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, Style, TextContent},
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
+mod clip_checks;
 mod interaction_checks;
 mod modal_checks;
+
+const CLIP_HEIGHT: f64 = 96.25;
 
 struct Prepared {
     content: TextContent,
@@ -36,6 +39,7 @@ pub(super) struct LayoutDemo {
     hovered: Option<WidgetId>,
     activation: ActivationState,
     selected: Option<WidgetId>,
+    clipped: bool,
     window_focused: bool,
     modifiers: winit::keyboard::ModifiersState,
     pub tint: [f32; 4],
@@ -83,6 +87,7 @@ impl LayoutDemo {
             hovered: None,
             activation: ActivationState::default(),
             selected: None,
+            clipped: false,
             window_focused: true,
             modifiers: winit::keyboard::ModifiersState::empty(),
             tint: [1.0; 4],
@@ -179,6 +184,8 @@ impl LayoutDemo {
                 (
                     Style {
                         width: Length::Px(column as f32),
+                        height: Length::Px(CLIP_HEIGHT as f32),
+                        clip_children: self.clipped,
                         padding: Edges::all(24.0),
                         gap: 16.0,
                         shrink: 0.0,
@@ -252,13 +259,9 @@ impl LayoutDemo {
     }
     fn visible(&self, id: &WidgetId) -> bool {
         self.snapshot.as_ref().is_some_and(|snapshot| {
-            let viewport = snapshot.viewport();
-            snapshot.bounds(id).is_some_and(|bounds| {
+            snapshot.visible_bounds(id).is_some_and(|bounds| {
                 bounds.size.width * f64::from(self.scale.unwrap_or(1.0)) >= 1.0
                     && bounds.size.height * f64::from(self.scale.unwrap_or(1.0)) >= 1.0
-                    && bounds
-                        .intersection(&Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height))
-                        .is_some()
             })
         })
     }
@@ -326,6 +329,21 @@ impl LayoutDemo {
         }
         self.refresh_input();
         true
+    }
+    fn toggle_clip(&mut self) -> bool {
+        let Some(viewport) = self.snapshot.as_ref().map(LayoutSnapshot::viewport) else {
+            return false;
+        };
+        let scale = self.scale.unwrap();
+        self.clipped = !self.clipped;
+        match self.update_geometry(viewport, scale) {
+            Ok(_) => true,
+            Err(error) => {
+                self.clipped = !self.clipped;
+                eprintln!("Layout clip change rejected: {error}");
+                false
+            }
+        }
     }
     pub fn pointer_moved(&mut self, point: Point<Logical>) -> bool {
         if !self.window_focused || !point.x.is_finite() || !point.y.is_finite() {
@@ -421,6 +439,9 @@ impl LayoutDemo {
         if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F3) {
             return pressed && !repeat && !self.unsupported_modifiers() && self.toggle_modal();
         }
+        if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F4) {
+            return pressed && !repeat && !self.unsupported_modifiers() && self.toggle_clip();
+        }
         if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F2) {
             if !pressed || repeat || self.unsupported_modifiers() {
                 return false;
@@ -499,99 +520,102 @@ impl LayoutDemo {
                         color: [0.0, 0.0, 0.0, 1.0],
                     })?;
                     for node in snapshot.boxes() {
-                        let bounds = node.bounds;
-                        if node.id == self.footer {
-                            if !bounds.is_empty() {
-                                let state = self.scene.state(&self.footer).unwrap();
+                        painter.with_clip(node.clip, |painter| {
+                            let bounds = node.bounds;
+                            if node.id == self.footer {
+                                if !bounds.is_empty() {
+                                    let state = self.scene.state(&self.footer).unwrap();
+                                    painter.quad(Quad {
+                                        bounds,
+                                        color: if !self.scene.input_allowed(&self.footer) {
+                                            [0.12, 0.12, 0.12, 1.0]
+                                        } else if state.pressed() {
+                                            [0.05, 0.3, 0.6, 1.0]
+                                        } else if self.selected.as_ref() == Some(&self.footer) {
+                                            [0.1, 0.75, 0.3, 1.0]
+                                        } else if state.focused() {
+                                            [0.2, 0.6, 1.0, 1.0]
+                                        } else if state.hovered() {
+                                            [0.4, 0.8, 1.0, 1.0]
+                                        } else {
+                                            [1.0; 4]
+                                        },
+                                    })?;
+                                }
+                                return Ok(());
+                            }
+                            let Some(label) = self.labels.iter().find(|label| label.id == node.id)
+                            else {
+                                return Ok(());
+                            };
+                            let Some(prepared) = &label.prepared else {
+                                return Ok(());
+                            };
+                            let Some(id) = prepared.image else {
+                                return Ok(());
+                            };
+                            let state = self.scene.state(&label.id).unwrap();
+                            if !bounds.is_empty()
+                                && (state.pressed() || state.focused() || state.hovered())
+                            {
                                 painter.quad(Quad {
                                     bounds,
-                                    color: if !self.scene.input_allowed(&self.footer) {
-                                        [0.12, 0.12, 0.12, 1.0]
-                                    } else if state.pressed() {
-                                        [0.05, 0.3, 0.6, 1.0]
-                                    } else if self.selected.as_ref() == Some(&self.footer) {
-                                        [0.1, 0.75, 0.3, 1.0]
+                                    color: if state.pressed() {
+                                        [0.15, 0.4, 0.65, 1.0]
                                     } else if state.focused() {
-                                        [0.2, 0.6, 1.0, 1.0]
-                                    } else if state.hovered() {
-                                        [0.4, 0.8, 1.0, 1.0]
+                                        [0.08, 0.18, 0.3, 1.0]
                                     } else {
-                                        [1.0; 4]
+                                        [0.035, 0.06, 0.09, 1.0]
                                     },
                                 })?;
                             }
-                            continue;
-                        }
-                        let Some(label) = self.labels.iter().find(|label| label.id == node.id)
-                        else {
-                            continue;
-                        };
-                        let Some(prepared) = &label.prepared else {
-                            continue;
-                        };
-                        let Some(id) = prepared.image else {
-                            continue;
-                        };
-                        let state = self.scene.state(&label.id).unwrap();
-                        if !bounds.is_empty()
-                            && (state.pressed() || state.focused() || state.hovered())
-                        {
-                            painter.quad(Quad {
-                                bounds,
-                                color: if state.pressed() {
-                                    [0.15, 0.4, 0.65, 1.0]
-                                } else if state.focused() {
-                                    [0.08, 0.18, 0.3, 1.0]
-                                } else {
-                                    [0.035, 0.06, 0.09, 1.0]
-                                },
-                            })?;
-                        }
-                        let bitmap = prepared.paragraph.bitmap();
-                        let scale = f64::from(bitmap.scale);
-                        let mut image = Image::new(
-                            id,
-                            Rect::from_xywh(
-                                bounds.origin.x + f64::from(bitmap.origin_x) / scale,
-                                bounds.origin.y + f64::from(bitmap.origin_y) / scale,
-                                f64::from(bitmap.width) / scale,
-                                f64::from(bitmap.height) / scale,
-                            ),
-                        );
-                        image.tint = self.tint;
-                        if !self.scene.input_allowed(&label.id) {
-                            for channel in &mut image.tint[..3] {
-                                *channel *= 0.35;
+                            let bitmap = prepared.paragraph.bitmap();
+                            let scale = f64::from(bitmap.scale);
+                            let mut image = Image::new(
+                                id,
+                                Rect::from_xywh(
+                                    bounds.origin.x + f64::from(bitmap.origin_x) / scale,
+                                    bounds.origin.y + f64::from(bitmap.origin_y) / scale,
+                                    f64::from(bitmap.width) / scale,
+                                    f64::from(bitmap.height) / scale,
+                                ),
+                            );
+                            image.tint = self.tint;
+                            if !self.scene.input_allowed(&label.id) {
+                                for channel in &mut image.tint[..3] {
+                                    *channel *= 0.35;
+                                }
                             }
-                        }
-                        painter.image(image)?;
-                        if self.selected.as_ref() == Some(&label.id) && !bounds.is_empty() {
-                            let height = bounds.size.height.min(2.0);
-                            painter.quad(Quad {
-                                bounds: Rect::from_xywh(
-                                    bounds.origin.x,
-                                    bounds.origin.y + bounds.size.height - height,
-                                    bounds.size.width,
-                                    height,
-                                ),
-                                color: if self.scene.input_allowed(&label.id) {
-                                    [0.1, 0.75, 0.3, 1.0]
-                                } else {
-                                    [0.12, 0.12, 0.12, 1.0]
-                                },
-                            })?;
-                        }
-                        if self.scene.modal_root() == Some(&label.id) && !bounds.is_empty() {
-                            painter.quad(Quad {
-                                bounds: Rect::from_xywh(
-                                    bounds.origin.x,
-                                    bounds.origin.y,
-                                    bounds.size.width,
-                                    bounds.size.height.min(2.0),
-                                ),
-                                color: [1.0, 0.6, 0.1, 1.0],
-                            })?;
-                        }
+                            painter.image(image)?;
+                            if self.selected.as_ref() == Some(&label.id) && !bounds.is_empty() {
+                                let height = bounds.size.height.min(2.0);
+                                painter.quad(Quad {
+                                    bounds: Rect::from_xywh(
+                                        bounds.origin.x,
+                                        bounds.origin.y + bounds.size.height - height,
+                                        bounds.size.width,
+                                        height,
+                                    ),
+                                    color: if self.scene.input_allowed(&label.id) {
+                                        [0.1, 0.75, 0.3, 1.0]
+                                    } else {
+                                        [0.12, 0.12, 0.12, 1.0]
+                                    },
+                                })?;
+                            }
+                            if self.scene.modal_root() == Some(&label.id) && !bounds.is_empty() {
+                                painter.quad(Quad {
+                                    bounds: Rect::from_xywh(
+                                        bounds.origin.x,
+                                        bounds.origin.y,
+                                        bounds.size.width,
+                                        bounds.size.height.min(2.0),
+                                    ),
+                                    color: [1.0, 0.6, 0.1, 1.0],
+                                })?;
+                            }
+                            Ok(())
+                        })?;
                     }
                     Ok(())
                 },
@@ -672,6 +696,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
         return Err("tint/unchanged layout rerasterized or reuploaded text".into());
     }
     interaction_checks::check(&mut demo, renderer)?;
+    clip_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
