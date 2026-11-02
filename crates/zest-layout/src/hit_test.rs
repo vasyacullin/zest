@@ -62,6 +62,8 @@ mod tests {
                 },
             ],
             index: HashMap::from([(a.clone(), 0), (b.clone(), 1)]),
+            parents: vec![None; 2],
+            clipping: vec![false; 2],
         }));
         (snapshot, a, b)
     }

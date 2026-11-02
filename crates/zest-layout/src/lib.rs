@@ -21,10 +21,12 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 mod hit_test;
+mod reveal;
 mod scroll;
 mod style;
 #[cfg(feature = "text")]
 mod text;
+pub use reveal::{RevealPlan, ScrollAdjustment};
 pub use scroll::ScrollMetrics;
 use std::{
     collections::{HashMap, HashSet},
@@ -126,6 +128,8 @@ struct SnapshotData {
     viewport: Size<Logical>,
     boxes: Vec<LayoutBox>,
     index: HashMap<WidgetId, usize>,
+    parents: Vec<Option<usize>>,
+    clipping: Vec<bool>,
 }
 /// An immutable computed scene, in parent-before-child declaration order. Old
 /// snapshots stay valid after sync/recompute; use the current one for input.
@@ -527,6 +531,8 @@ impl LayoutTree {
         }
         let mut boxes: Vec<LayoutBox> = Vec::with_capacity(self.order.len());
         let mut index: HashMap<WidgetId, usize> = HashMap::with_capacity(self.order.len());
+        let mut parents = Vec::with_capacity(self.order.len());
+        let mut clipping = Vec::with_capacity(self.order.len());
         let scroll_metrics = match self.scroll_metrics() {
             Ok(metrics) => metrics,
             Err(error) => {
@@ -588,6 +594,8 @@ impl LayoutTree {
                     node.clip
                 }
             });
+            parents.push(entry.parent.as_ref().map(|parent| index[parent]));
+            clipping.push(entry.style.clip_children);
             index.insert(id.clone(), boxes.len());
             boxes.push(LayoutBox {
                 id: id.clone(),
@@ -606,6 +614,8 @@ impl LayoutTree {
             viewport,
             boxes,
             index,
+            parents,
+            clipping,
         }));
         self.snapshot = Some(snapshot.clone());
         Ok(ComputedLayout {

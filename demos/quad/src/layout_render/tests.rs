@@ -486,7 +486,7 @@ fn ancestor_clip_cancels_hidden_pointer_focus_and_preserves_raw_bounds_and_shape
     for expected in [
         demo.labels[0].id.clone(),
         demo.labels[1].id.clone(),
-        demo.labels[0].id.clone(),
+        demo.footer.clone(),
     ] {
         tab(&mut demo);
         assert_eq!(demo.scene.focused(), Some(&expected));
@@ -530,43 +530,26 @@ fn closing_a_modal_cannot_restore_focus_to_an_ancestor_clipped_widget() {
 }
 
 #[test]
-fn subpixel_visible_slivers_are_excluded_from_pointer_and_tab_eligibility() {
+fn subpixel_visible_slivers_reject_pointer_input_until_tab_reveals_the_target() {
     let mut demo = demo();
     let old = demo.snapshot.as_ref().unwrap().clone();
-    let body = demo.labels[1].id.clone();
-    let clip_height = old.bounds(&body).unwrap().origin.y + 0.25;
-    demo.tree
-        .sync(&demo.scene, |id| {
-            if id == &demo.root {
-                Style {
-                    width: Length::Px(480.0),
-                    height: Length::Px(clip_height as f32),
-                    padding: Edges::all(24.0),
-                    gap: 16.0,
-                    shrink: 0.0,
-                    clip_children: true,
-                    ..Default::default()
-                }
-            } else {
-                Style {
-                    height: Length::Px(old.bounds(id).unwrap().size.height as f32),
-                    shrink: 0.0,
-                    ..Default::default()
-                }
-            }
-        })
-        .unwrap();
-    demo.snapshot = Some(demo.tree.compute(old.viewport()).unwrap().snapshot);
+    let title = demo.labels[0].id.clone();
+    let bounds = old.bounds(&title).unwrap();
+    demo.clipped = true;
+    demo.scroll_offset.y = bounds.origin.y + bounds.size.height - 0.25;
+    demo.update_geometry(old.viewport(), 1.25).unwrap();
     assert!(
         demo.snapshot
             .as_ref()
             .unwrap()
-            .visible_bounds(&body)
+            .visible_bounds(&title)
             .is_some()
     );
-    assert!(!demo.visible(&body));
-    assert!(demo.hit(Point::new(34.0, clip_height - 0.1)).is_none());
+    assert!(!demo.visible(&title));
+    demo.pointer_moved(Point::new(34.0, 0.1));
+    assert!(demo.hit(Point::new(34.0, 0.1)).is_none());
     assert!(tab(&mut demo));
-    assert_eq!(demo.scene.focused(), Some(&demo.labels[0].id));
-    assert!(!tab(&mut demo));
+    assert_eq!(demo.scene.focused(), Some(&title));
+    assert!(demo.visible(&title));
+    assert_eq!(demo.hovered.as_ref(), Some(&title));
 }

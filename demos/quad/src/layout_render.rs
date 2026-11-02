@@ -4,10 +4,11 @@ use zest::{
     FocusDirection, Scene, WidgetId,
     geometry::Size,
     input::{ActivationKey, ActivationState, InputResult},
-    layout::{Edges, LayoutSnapshot, LayoutTree, Length, Style, TextContent},
+    layout::{Edges, LayoutSnapshot, LayoutTree, Length, RevealPlan, Style, TextContent},
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
 mod clip_checks;
+mod focus_checks;
 mod interaction_checks;
 mod modal_checks;
 mod scroll_checks;
@@ -269,6 +270,37 @@ impl LayoutDemo {
                     && bounds.size.height * f64::from(self.scale.unwrap_or(1.0)) >= 1.0
             })
         })
+    }
+    fn focus_plan(&self, id: &WidgetId) -> Option<RevealPlan> {
+        if !self.interactive(id) {
+            return None;
+        }
+        let plan = self.snapshot.as_ref()?.reveal_plan(id)?;
+        let scale = f64::from(self.scale.unwrap_or(1.0));
+        (plan.visible_bounds.size.width * scale >= 1.0
+            && plan.visible_bounds.size.height * scale >= 1.0
+            && plan
+                .adjustments
+                .iter()
+                .all(|change| change.widget == self.root))
+        .then_some(plan)
+    }
+    fn reveal_focus(&mut self) -> bool {
+        let Some(plan) = self.scene.focused().and_then(|id| self.focus_plan(id)) else {
+            return false;
+        };
+        let Some(change) = plan.adjustments.first() else {
+            return false;
+        };
+        let viewport = self.snapshot.as_ref().unwrap().viewport();
+        let previous = self.scroll_offset;
+        self.scroll_offset = change.offset;
+        if let Err(error) = self.update_geometry(viewport, self.scale.unwrap()) {
+            self.scroll_offset = previous;
+            eprintln!("Focus reveal rejected: {error}");
+            self.set_focus(None);
+        }
+        true
     }
     fn hit(&self, point: Point<Logical>) -> Option<WidgetId> {
         self.snapshot
@@ -564,7 +596,7 @@ impl LayoutDemo {
         let eligible: std::collections::HashSet<_> = snapshot
             .boxes()
             .iter()
-            .filter(|node| self.interactive(&node.id) && self.visible(&node.id))
+            .filter(|node| self.focus_plan(&node.id).is_some())
             .map(|node| node.id.clone())
             .collect();
         let direction = if self.modifiers.shift_key() {
@@ -572,7 +604,8 @@ impl LayoutDemo {
         } else {
             FocusDirection::Forward
         };
-        self.scene.focus_next(direction, |id| eligible.contains(id)) || cancelled
+        let focused = self.scene.focus_next(direction, |id| eligible.contains(id));
+        self.reveal_focus() || focused || cancelled
     }
     pub fn paint(&self) -> Result<DisplayList, PaintError> {
         let Some(snapshot) = &self.snapshot else {
@@ -769,6 +802,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     interaction_checks::check(&mut demo, renderer)?;
     clip_checks::check(&mut demo, renderer)?;
     scroll_checks::check(&mut demo, renderer)?;
+    focus_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -820,6 +854,8 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
     )
 }
 
+#[cfg(test)]
+mod focus_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]

@@ -72,7 +72,7 @@ fn wheel_rejects_inactive_outside_modified_nonfinite_and_unclipped_requests() {
 }
 
 #[test]
-fn scrolling_cancels_gestures_rehits_a_stationary_pointer_and_filters_tab_by_projected_bounds() {
+fn scrolling_cancels_gestures_rehits_a_stationary_pointer_and_keyboard_reveals_hidden_nodes() {
     let mut demo = demo();
     let title = demo.labels[0].id.clone();
     let body = demo.labels[1].id.clone();
@@ -87,6 +87,9 @@ fn scrolling_cancels_gestures_rehits_a_stationary_pointer_and_filters_tab_by_pro
     assert_eq!(demo.hovered.as_ref(), Some(&body));
     assert_eq!(demo.labels[1].content, content);
     let tab = Key::Named(NamedKey::Tab);
+    demo.key(&tab, true, false);
+    assert_eq!(demo.scene.focused(), Some(&title));
+    assert!(demo.visible(&title));
     demo.key(&tab, true, false);
     assert_eq!(demo.scene.focused(), Some(&body));
     demo.key(&tab, true, false);

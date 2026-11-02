@@ -76,13 +76,16 @@ pub(super) fn check(
     for expected in [
         demo.labels[0].id.clone(),
         demo.labels[1].id.clone(),
-        demo.labels[0].id.clone(),
+        demo.footer.clone(),
     ] {
         demo.key(&tab, true, false);
         if demo.scene.focused() != Some(&expected) {
-            return Err("Tab did not skip the ancestor-clipped footer".into());
+            return Err("Tab did not reveal the ancestor-clipped footer".into());
         }
     }
+    // Restore the top position before checking the modal's top-edge marker.
+    demo.key(&f4, true, false);
+    demo.key(&f4, true, false);
     let f3 = Key::Named(NamedKey::F3);
     demo.key(&f3, true, false);
     let image = capture(demo, renderer)?;
@@ -131,7 +134,7 @@ pub(super) fn check(
         return Err("clip-only updates changed text paragraphs/images or uploaded textures".into());
     }
     println!(
-        "GPU ancestor clip checks passed: fractional text/marker pixels, matching hit bounds, hidden-focus/gesture cancellation, modal scope, Tab filtering and paragraph/image reuse"
+        "GPU ancestor clip checks passed: fractional text/marker pixels, matching hit bounds, hidden-focus/gesture cancellation, modal scope, keyboard reveal and paragraph/image reuse"
     );
     Ok(())
 }

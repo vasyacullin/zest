@@ -447,7 +447,7 @@ impl ApplicationHandler for App {
                 );
             } else {
                 println!(
-                    "Layout preview: click or Enter/Space toggles selection; Tab/Shift+Tab changes focus. F2 toggles the body label's enabled state. F3 scopes input to the body; Esc restores the previous focus, then closes. F4 clips the column; wheel scrolls inside it. Resize reflows text. Text/IME editing is available in the default demo."
+                    "Layout preview: click or Enter/Space toggles selection; Tab/Shift+Tab reveals and focuses nodes. F2 toggles the body label's enabled state. F3 scopes input to the body; Esc restores the previous focus, then closes. F4 clips the column; wheel scrolls inside it. Resize reflows text. Text/IME editing is available in the default demo."
                 );
             }
             self.text.focus(self.layout.is_none() && window.has_focus());

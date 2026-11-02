@@ -142,7 +142,7 @@ through nonclipping descendants but stops at a clipping child's border; nested
 scrollers calculate independent ranges from unscrolled layout. Resizing/content
 changes recompute those ranges and reclamp requested positions. Empty containers
 have no range. This initial implementation does not expose negative overflow
-before the origin, scrollbars, touch gestures or automatic focus revelation.
+before the origin, scrollbars or touch gestures.
 Wrap text in a container to scroll it; a leaf's own bitmap is not scroll content.
 
 `LayoutBox::layout_bounds` retains absolute unscrolled geometry; `bounds` contains
@@ -150,6 +150,18 @@ the projected position after all ancestor scrolling. Paint, clips, visible bound
 and hit testing use that same projection. Sizes/text measurement stay unchanged.
 The core scene remains geometry-independent: update eligibility/cancel gestures
 from current snapshots when scrolling or restoring focus.
+
+`LayoutSnapshot::reveal_plan(id)` computes a read-only `RevealPlan` with absolute
+`ScrollAdjustment { widget, offset }` values for changed ancestors, ordered from
+innermost to outermost. Apply them to those nodes' styles and sync/compute again.
+`visible_bounds` predicts the visible portion after all changes, including the
+viewport. Small targets use the nearest edge that fits them; oversized targets
+fill their scrollport and stay still when they already span it. An inner clip
+passes only its visible portion outward, avoiding unnecessary outer movement.
+Visible targets can return an empty list. Unknown, empty or completely
+unreachable targets return None. Planning does not mutate the scene/snapshot,
+run Taffy or measure text. Use fresh snapshots and check scene eligibility;
+plans carry no entity-generation or input/modal authorization.
 
 Enable the facade's `layout-text` feature (or `zest-layout/text`) to connect
 shaped text to Flexbox leaves. Create `TextContent::new(raster.shape(text,
@@ -187,8 +199,9 @@ when its content width is below one physical pixel and handles empty viewports.
 Hover highlights a label/marker; pressing the primary mouse button focuses it.
 Releasing over the same node toggles selection (green underline/marker). Moving
 away disarms the press without transferring capture; moving back re-arms it.
-Blank-space presses clear focus. Tab/Shift+Tab cycles visible interactive nodes
-in declaration order. Enter/Space toggles selection on release; repeats and
+Blank-space presses clear focus. Tab/Shift+Tab cycles eligible interactive nodes
+in declaration order, revealing hidden targets through the column's scrollport.
+Disabled/modal-blocked nodes and unreachable clips are skipped. Enter/Space toggles selection on release; repeats and
 synthetic keys cannot activate nodes. Unsupported modifiers cancel a pending press.
 F2 toggles the body label's enabled state. Disabled labels are dimmed, reject
 pointer/keyboard activation and are skipped by Tab; selection stays retained.
@@ -202,6 +215,11 @@ overflow again. Text and the marker keep the same layout bounds and textures.
 Paint, pointer hits, Tab and restored focus use the same effective ancestor clip;
 visible slivers narrower/shorter than one physical pixel are ineligible. Changing
 clips cancels pending gestures and re-hits a stationary pointer before more input.
+Keyboard traversal applies a reveal plan before checking the new focused node's
+visibility. It works in both directions and when a modal retains the same focused
+ID but needs a scroll adjustment. Repeated revelation of a spanning/visible
+target leaves the snapshot unchanged. Mouse input still requires currently
+visible bounds, including the minimum one-physical-pixel extent.
 While F4 clipping is enabled, the wheel scrolls the column under the pointer.
 Line deltas use 36 logical pixels; touchpad pixels are divided by window DPI.
 Shift redirects vertical-only deltas horizontally; unsupported modifiers and
@@ -210,7 +228,7 @@ the snapshot. Modal scopes accept wheel input only over eligible content, and a
 disabled/unfocused column rejects it. Scrolling re-hits a stationary pointer and
 cancels gestures; fully hidden focus is cleared. Resizing reclamps the position;
 turning F4 off resets it. Text paragraphs and GPU images stay reusable.
-Fully clipped or subpixel-sized targets are skipped. Geometry is refreshed before
+Targets that cannot reveal a one-physical-pixel visible area are skipped. Geometry is refreshed before
 pointer/keyboard/wheel input, and resize re-hits a stationary pointer. DPI changes discard
 stale pointer coordinates; focus remains on the keyed node while it is visible.
 Focus loss clears hover/focus/modifiers and resets pending gestures. Geometry,
