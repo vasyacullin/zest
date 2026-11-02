@@ -20,6 +20,7 @@
 //! assert!(!cached.stats.performed);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+mod diff;
 mod hit_test;
 mod reveal;
 mod scroll;
@@ -28,6 +29,7 @@ mod scrollbar;
 mod style;
 #[cfg(feature = "text")]
 mod text;
+pub use diff::LayoutChanges;
 pub use reveal::{RevealPlan, ScrollAdjustment};
 pub use scroll::ScrollMetrics;
 pub use scroll_chain::ScrollPlan;

@@ -45,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(tree.sync(&scene, styles)?, Default::default());
     let cached = tree.compute(viewport)?;
     assert!(!cached.stats.performed && initial.snapshot.same_snapshot(&cached.snapshot));
+    assert!(cached.snapshot.changes_since(&initial.snapshot).is_empty());
     scene.update_children(&toolbar, |ui| {
         assert_eq!(ui.button("two", "Second"), second);
         assert_eq!(ui.button("one", "First"), first);
@@ -53,6 +54,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(sync.created, 0);
     assert_eq!(sync.removed, 0);
     let reordered = tree.compute(viewport)?;
+    let changes = reordered.snapshot.changes_since(&initial.snapshot);
+    assert!(changes.order_changed && !changes.viewport_changed);
+    assert_eq!(changes.changed, [second.clone(), first.clone()]);
+    assert!(changes.added.is_empty() && changes.removed.is_empty());
+    scene.take_paint_invalidation();
+    for id in &changes.changed {
+        scene.invalidate_paint(id);
+    }
+    assert_eq!(scene.take_paint_invalidation().widgets, changes.changed);
     assert!(
         reordered.snapshot.bounds(&first).unwrap().origin.x
             > reordered.snapshot.bounds(&second).unwrap().origin.x
@@ -99,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(list.len(), 2);
     println!("Reordered retained nodes: {sync:?}; {:?}", reordered.stats);
     println!(
-        "Layout smoke passed: fractional logical bounds, keyed reorder, current-snapshot hit testing, focus/hover, cache reuse, immutable snapshots and display-list geometry."
+        "Layout smoke passed: fractional logical bounds, keyed reorder/diff, geometry paint invalidation, current-snapshot hit testing, focus/hover, cache reuse, immutable snapshots and display-list geometry."
     );
     Ok(())
 }

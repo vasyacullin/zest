@@ -88,6 +88,26 @@ reuse Taffy's retained caches where constraints permit. `SyncStats` counts chang
 nodes/child lists, and `ComputeStats` reports engine execution and intrinsic
 measurement calls, rather than total node visits.
 
+`new.changes_since(&old)` compares computed snapshots without changing the scene,
+layout engine or either snapshot. `LayoutChanges` lists `added` and `changed` IDs
+in new declaration order, and `removed` IDs in old order. Retained-node comparison
+includes projected/unscrolled bounds, effective clips, scroll metrics, parent and
+clip-children policy, including invisible nodes. `order_changed` compares the full
+declaration sequence, so additions/removals also set it; `viewport_changed` can be
+true even for an empty layout. `is_empty()` checks all lists and flags.
+
+Shared snapshots compare empty immediately. Otherwise the comparison walks both
+snapshots using existing identity indexes; independently computed equal geometry
+also compares empty. Style inputs, text/appearance and entity generations are
+outside this comparison. A recreated key with identical layout can compare equal;
+combine layout changes with scene paint invalidation to cover that case. Old/new
+bounds remain available on their respective snapshots for repaint decisions.
+This API does not calculate damage rectangles, run layout, mark scene flags or
+schedule frames. The layout preview marks added/changed nodes for paint, and its
+root on viewport/sequence/removal changes, then redraws the whole frame. Geometry
+changes therefore invalidate paint without a scene declaration update; unchanged
+geometry keeps paint clean. Text/image caches stay reusable for clip/scroll changes.
+
 The headless `zest-layout-demo` checks reorder identity, focus/hover, fractional
 bounds, snapshot/cache reuse and explicit conversion of layout bounds into quads.
 The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout,

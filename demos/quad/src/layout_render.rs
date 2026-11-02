@@ -9,6 +9,7 @@ use zest::{
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
 mod clip_checks;
+mod diff_checks;
 mod event_checks;
 mod focus_checks;
 mod interaction_checks;
@@ -258,6 +259,15 @@ impl LayoutDemo {
         })?;
         let snapshot = self.tree.compute(viewport)?.snapshot;
         self.scroll_offset = snapshot.scroll(&self.root).unwrap_or_default().offset;
+        if let Some(old) = &self.snapshot {
+            let changes = snapshot.changes_since(old);
+            for id in changes.added.iter().chain(&changes.changed) {
+                self.scene.invalidate_paint(id);
+            }
+            if changes.viewport_changed || changes.order_changed || !changes.removed.is_empty() {
+                self.scene.invalidate_paint(&self.root);
+            }
+        }
         let mut changed = self
             .snapshot
             .as_ref()
@@ -955,6 +965,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     scroll_chain_checks::check(renderer)?;
     event_checks::check(&mut demo, renderer)?;
     paint_checks::check(&mut demo, renderer)?;
+    diff_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
