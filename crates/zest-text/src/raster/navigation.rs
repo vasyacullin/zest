@@ -3,11 +3,15 @@ use crate::Selection;
 use std::sync::Arc;
 
 /// Layout-aware movement; line start/end follow logical text order within the
-/// current displayed line. Left/right follow visual cluster order.
+/// current displayed line. Left/right follow visual cluster order; word variants
+/// follow visual word boundaries. Unextended horizontal moves collapse ranges
+/// toward the requested visual edge before moving further.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Navigation {
     Left,
     Right,
+    WordLeft,
+    WordRight,
     Up,
     Down,
     LineStart,
@@ -101,6 +105,14 @@ impl Paragraph {
         let move_once = |current: parley::Selection| match movement {
             Navigation::Left => current.previous_visual(&self.layout, extend),
             Navigation::Right => current.next_visual(&self.layout, extend),
+            Navigation::WordLeft if !extend && !current.is_collapsed() => {
+                current.previous_visual(&self.layout, false)
+            }
+            Navigation::WordRight if !extend && !current.is_collapsed() => {
+                current.next_visual(&self.layout, false)
+            }
+            Navigation::WordLeft => current.previous_visual_word(&self.layout, extend),
+            Navigation::WordRight => current.next_visual_word(&self.layout, extend),
             Navigation::Up => current.previous_line(&self.layout, extend),
             Navigation::Down => current.next_line(&self.layout, extend),
             Navigation::LineStart => current.line_start(&self.layout, extend),
@@ -125,8 +137,10 @@ impl Paragraph {
         // graphemes. Keep affinity-only transitions at valid byte boundaries.
         for _ in 0..self.text.len().saturating_mul(2).saturating_add(4) {
             let candidate = move_once(current);
-            if !matches!(movement, Navigation::Left | Navigation::Right)
-                || crate::boundary(&self.text, candidate.focus().index())
+            if !matches!(
+                movement,
+                Navigation::Left | Navigation::Right | Navigation::WordLeft | Navigation::WordRight
+            ) || crate::boundary(&self.text, candidate.focus().index())
             {
                 return self.wrap_selection(candidate);
             }

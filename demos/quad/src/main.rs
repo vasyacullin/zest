@@ -416,6 +416,14 @@ impl ApplicationHandler for App {
             println!(
                 "Click/drag to edit; arrows move visually, Up/Down preserve the column, Shift selects. Home/End use line edges; Ctrl/Cmd+Home/End use document edges. Ctrl/Cmd+C/X/V copy/cut/paste. Wheel scrolls. Esc cancels composition, then closes."
             );
+            let word_modifier = if cfg!(target_os = "macos") {
+                "Option"
+            } else {
+                "Ctrl"
+            };
+            println!(
+                "{word_modifier}+Left/Right moves by words; add Shift to select. {word_modifier}+Backspace/Delete deletes by words."
+            );
             self.text.focus(window.has_focus());
             window.set_ime_allowed(self.text.input.focused);
             window.request_redraw();

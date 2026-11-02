@@ -51,8 +51,11 @@ undo, and Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Ctrl/Cmd+Home/End move to docu
 start/end. Left/Right follow visual order in LTR/RTL runs; Up/Down preserve the
 desired horizontal position through short or wrapped lines. Home/End use logical
 text start/end within the displayed line. On macOS, Cmd+Left/Right also use line
-boundaries and Cmd+Up/Down use document boundaries. Word and page navigation are
-still pending. Click places
+boundaries and Cmd+Up/Down use document boundaries. Ctrl+Left/Right (Option on
+macOS) move by visual word boundaries; Shift extends the selection. Without Shift,
+an existing range first collapses toward the requested visual edge. Ctrl+Backspace
+and Ctrl+Delete (Option on macOS) delete the selection or the previous/next word
+in logical text order, as one undo step. Page navigation is still pending. Click places
 the caret using layout hit testing; Shift+click extends selection. Hold the left
 button and drag to extend from a fixed anchor, including across graphemes and
 wrapped/RTL runs. Dragging beyond the text viewport scrolls toward that edge
@@ -279,6 +282,24 @@ forward to a grapheme boundary after an edit merges adjacent clusters. Movement
 is in logical string order. The optional paragraph layer provides visual bidi
 movement, line navigation and layout hit testing for interactive editors. Text and line
 endings are preserved verbatim.
+
+`Movement::PreviousWord` / `NextWord` and `delete_previous_word()` /
+`delete_next_word()` use Unicode word segments in logical string order. Backward
+steps reach the previous segment's start; forward steps reach the next segment's
+end, skipping intervening whitespace. Punctuation and emoji remain navigable
+segments. Segmentation keeps full-document context for apostrophes and numbers,
+and endpoints snap outward to extended grapheme boundaries. Existing selections
+collapse before unextended motion; deletion replaces the selected range directly
+and undo restores its original direction. This is Unicode segmentation, without
+locale-specific dictionary or programming-language subword rules.
+
+The paragraph layer adds `Navigation::WordLeft` / `WordRight` using Parley's visual
+word boundaries, preserving bidi/wrap affinity and Shift anchors. It skips stops
+inside model graphemes and resets the saved vertical goal column. Logical model
+steps and visual paragraph steps can differ in mixed-direction text. Word motion
+does not change history, rebuild the paragraph or upload another text image.
+Word commands are blocked during preedit; an accepted deletion that changes no
+text still reveals a manually hidden caret.
 
 Preedit replaces the selected range only in `display_text()`. Its cursor is
 relative to the preedit string and may use any UTF-8 scalar boundary. Invalid

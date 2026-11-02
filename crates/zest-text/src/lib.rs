@@ -1,5 +1,5 @@
-//! Window-independent UTF-8 editing. Cursor motion uses extended grapheme
-//! clusters in logical string order; visual bidi navigation needs a layout engine.
+//! Window-independent UTF-8 editing. Grapheme/word commands preserve extended
+//! grapheme boundaries in logical order; visual bidi motion needs a layout engine.
 //! Preedit is transient and never changes committed text or history. No font,
 //! shaping, rasterization or OS event dependencies are required by default.
 //! The optional `raster` feature adds explicit-font paragraph layout and bitmaps.
@@ -22,8 +22,10 @@ use std::{borrow::Cow, fmt, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 
 mod history;
+mod words;
 use history::{Edit, History};
 pub use history::{HistoryLimits, HistoryStats};
+use words::{next_word, previous_word};
 
 #[cfg(feature = "raster")]
 pub mod raster;
@@ -58,6 +60,8 @@ impl Selection {
 pub enum Movement {
     PreviousGrapheme,
     NextGrapheme,
+    PreviousWord,
+    NextWord,
     DocumentStart,
     DocumentEnd,
 }
@@ -199,14 +203,27 @@ impl TextBuffer {
     }
     /// Without extension, a previous/next movement collapses an existing range
     /// to its start/end. With extension, the anchor is retained when crossing it.
+    /// Word steps skip whitespace toward the start of the previous Unicode word
+    /// segment or the end of the next one. Punctuation and emoji remain segments;
+    /// endpoints are normalized to extended grapheme boundaries.
     pub fn move_cursor(&mut self, movement: Movement, extend: bool) -> Result<bool, EditError> {
         self.ensure_editable()?;
         let range = self.selection.range();
         let head = match movement {
-            Movement::PreviousGrapheme if !extend && !self.selection.is_caret() => range.start,
-            Movement::NextGrapheme if !extend && !self.selection.is_caret() => range.end,
+            Movement::PreviousGrapheme | Movement::PreviousWord
+                if !extend && !self.selection.is_caret() =>
+            {
+                range.start
+            }
+            Movement::NextGrapheme | Movement::NextWord
+                if !extend && !self.selection.is_caret() =>
+            {
+                range.end
+            }
             Movement::PreviousGrapheme => previous(&self.text, self.selection.head),
             Movement::NextGrapheme => next(&self.text, self.selection.head),
+            Movement::PreviousWord => previous_word(&self.text, self.selection.head),
+            Movement::NextWord => next_word(&self.text, self.selection.head),
             Movement::DocumentStart => 0,
             Movement::DocumentEnd => self.text.len(),
         };
@@ -232,6 +249,26 @@ impl TextBuffer {
         let mut range = self.selection.range();
         if self.selection.is_caret() {
             range.end = next(&self.text, range.end);
+        }
+        Ok(self.replace(range, ""))
+    }
+    /// Deletes the selection, or whitespace and the previous Unicode word
+    /// segment in logical order. One undo step restores the original selection.
+    pub fn delete_previous_word(&mut self) -> Result<bool, EditError> {
+        self.ensure_editable()?;
+        let mut range = self.selection.range();
+        if self.selection.is_caret() {
+            range.start = previous_word(&self.text, range.start);
+        }
+        Ok(self.replace(range, ""))
+    }
+    /// Deletes the selection, or whitespace and the next Unicode word segment
+    /// in logical order. Punctuation/emoji are not skipped as whitespace.
+    pub fn delete_next_word(&mut self) -> Result<bool, EditError> {
+        self.ensure_editable()?;
+        let mut range = self.selection.range();
+        if self.selection.is_caret() {
+            range.end = next_word(&self.text, range.end);
         }
         Ok(self.replace(range, ""))
     }

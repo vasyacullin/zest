@@ -1,5 +1,95 @@
 use super::*;
 use crate::raster::{RasterOptions, Rasterizer};
+use unicode_segmentation::UnicodeSegmentation;
+
+#[test]
+fn visual_word_steps_select_whole_words_and_collapse_existing_ranges() {
+    let paragraph = paragraph("one two three", 400.0);
+    let start = paragraph.layout_selection(Selection::caret(0)).unwrap();
+    let first = paragraph
+        .move_selection(&start, Navigation::WordRight, true)
+        .unwrap();
+    assert_eq!(first.selection(), Selection::new(0, 3));
+    let second = paragraph
+        .move_selection(&first, Navigation::WordRight, true)
+        .unwrap();
+    assert_eq!(second.selection(), Selection::new(0, 7));
+    let collapsed = paragraph
+        .move_selection(&second, Navigation::WordLeft, false)
+        .unwrap();
+    assert_eq!(collapsed.selection(), Selection::caret(0));
+    let end = paragraph
+        .move_selection(&second, Navigation::WordRight, false)
+        .unwrap();
+    assert_eq!(end.selection(), Selection::caret(7));
+    let previous = paragraph
+        .move_selection(&end, Navigation::WordLeft, true)
+        .unwrap();
+    assert_eq!(previous.selection(), Selection::new(7, 4));
+    let previous = paragraph
+        .move_selection(&previous, Navigation::WordLeft, true)
+        .unwrap();
+    assert_eq!(previous.selection(), Selection::new(7, 0));
+}
+
+#[test]
+fn visual_word_left_in_rtl_advances_bytes_while_retaining_the_anchor() {
+    let paragraph = paragraph("واحد اثنان", 400.0);
+    let start = paragraph.layout_selection(Selection::caret(0)).unwrap();
+    let left = paragraph
+        .move_selection(&start, Navigation::WordLeft, true)
+        .unwrap();
+    assert_eq!(left.selection().anchor, 0);
+    assert!(left.selection().head >= "واحد".len());
+    assert!(
+        paragraph.selection_caret(&left).unwrap().x < paragraph.selection_caret(&start).unwrap().x
+    );
+    let right = paragraph
+        .move_selection(&left, Navigation::WordRight, true)
+        .unwrap();
+    assert_eq!(right.selection(), Selection::caret(0));
+}
+
+#[test]
+fn visual_word_steps_terminate_on_graphemes_across_bidi_wraps_and_missing_emoji() {
+    for text in [
+        "",
+        "  \n\t",
+        "one العربية e\u{301} 👩🏽‍💻 🇯🇵 two\nthree",
+        "\u{301}can't 日,日",
+    ] {
+        let paragraph = paragraph(text, 95.0);
+        for offset in text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain([text.len()])
+        {
+            for movement in [Navigation::WordLeft, Navigation::WordRight] {
+                let mut current = paragraph
+                    .layout_selection(Selection::caret(offset))
+                    .unwrap();
+                let mut visited = vec![current.clone()];
+                loop {
+                    let next = paragraph.move_selection(&current, movement, true).unwrap();
+                    assert_eq!(next.selection().anchor, offset);
+                    assert!(crate::boundary(text, next.selection().head));
+                    paragraph.selection_caret(&next).unwrap();
+                    paragraph.selection_geometry(&next).unwrap();
+                    if next.same_position(&current) {
+                        break;
+                    }
+                    assert!(
+                        !visited.iter().any(|state| next.same_position(state)),
+                        "cycle: {text:?}, {movement:?}"
+                    );
+                    assert!(visited.len() <= text.len() * 2 + 4);
+                    visited.push(next.clone());
+                    current = next;
+                }
+            }
+        }
+    }
+}
 
 fn paragraph(text: &str, width: f32) -> Paragraph {
     let mut raster = Rasterizer::new();
@@ -183,6 +273,8 @@ fn empty_paragraph_navigation_stays_valid_in_every_direction() {
     for movement in [
         Navigation::Left,
         Navigation::Right,
+        Navigation::WordLeft,
+        Navigation::WordRight,
         Navigation::Up,
         Navigation::Down,
         Navigation::LineStart,

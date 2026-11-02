@@ -1,6 +1,169 @@
 use super::*;
 
 #[test]
+fn logical_word_steps_keep_unicode_words_punctuation_and_emoji() {
+    let units = [
+        "can't",
+        "32.3",
+        ",",
+        "Привет",
+        "العربية",
+        "e\u{301}",
+        "👩🏽‍💻",
+        "🇯🇵",
+        "日",
+    ];
+    let text = format!("  {}\r\n\t", units.join(" \t"));
+    let mut buffer = TextBuffer::new(&text);
+    buffer.move_cursor(Movement::DocumentStart, false).unwrap();
+    let mut end = 2;
+    for unit in units {
+        end += unit.len();
+        buffer.move_cursor(Movement::NextWord, false).unwrap();
+        assert_eq!(buffer.selection(), Selection::caret(end), "{unit}");
+        end += 2;
+    }
+    assert!(buffer.move_cursor(Movement::NextWord, false).unwrap());
+    assert_eq!(buffer.selection().head, text.len());
+    assert!(!buffer.move_cursor(Movement::NextWord, false).unwrap());
+    for unit in units.into_iter().rev() {
+        buffer.move_cursor(Movement::PreviousWord, false).unwrap();
+        assert!(buffer.text()[buffer.selection().head..].starts_with(unit));
+    }
+    buffer.move_cursor(Movement::PreviousWord, false).unwrap();
+    assert_eq!(buffer.selection(), Selection::caret(0));
+    assert!(!buffer.move_cursor(Movement::PreviousWord, false).unwrap());
+    assert_eq!(buffer.history_stats().undo_edits, 0);
+}
+
+#[test]
+fn word_selection_collapses_without_skipping_and_retains_shift_anchor() {
+    let mut buffer = TextBuffer::new("one two three");
+    buffer.set_selection(Selection::new(7, 4)).unwrap();
+    buffer.move_cursor(Movement::PreviousWord, false).unwrap();
+    assert_eq!(buffer.selection(), Selection::caret(4));
+    buffer.move_cursor(Movement::NextWord, true).unwrap();
+    assert_eq!(buffer.selection(), Selection::new(4, 7));
+    buffer.move_cursor(Movement::PreviousWord, true).unwrap();
+    buffer.move_cursor(Movement::PreviousWord, true).unwrap();
+    assert_eq!(buffer.selection(), Selection::new(4, 0));
+    buffer.move_cursor(Movement::NextWord, false).unwrap();
+    assert_eq!(buffer.selection(), Selection::caret(4));
+}
+
+#[test]
+fn word_deletion_is_one_edit_and_undo_restores_the_original_selection() {
+    for forward in [false, true] {
+        let mut buffer = TextBuffer::new("a 👩🏽‍💻 e\u{301} z");
+        let offset = if forward {
+            1
+        } else {
+            "a 👩🏽‍💻 ".len()
+        };
+        buffer.set_selection(Selection::caret(offset)).unwrap();
+        if forward {
+            buffer.delete_next_word().unwrap();
+        } else {
+            buffer.delete_previous_word().unwrap();
+        }
+        assert_eq!(buffer.text(), "a e\u{301} z");
+        assert_eq!(buffer.history_stats().undo_edits, 1);
+        buffer.undo().unwrap();
+        assert_eq!(buffer.text(), "a 👩🏽‍💻 e\u{301} z");
+        assert_eq!(buffer.selection(), Selection::caret(offset));
+        buffer.redo().unwrap();
+        assert_eq!(buffer.text(), "a e\u{301} z");
+        buffer.undo().unwrap();
+        let selection = Selection::new(buffer.text().len(), 2);
+        buffer.set_selection(selection).unwrap();
+        if forward {
+            buffer.delete_next_word().unwrap();
+        } else {
+            buffer.delete_previous_word().unwrap();
+        }
+        assert_eq!(buffer.text(), "a ");
+        buffer.undo().unwrap();
+        assert_eq!(buffer.selection(), selection);
+    }
+    let mut empty = TextBuffer::default();
+    assert!(!empty.delete_previous_word().unwrap());
+    assert!(!empty.delete_next_word().unwrap());
+    assert_eq!(empty.history_stats().undo_edits, 0);
+}
+
+#[test]
+fn word_commands_are_atomic_during_composition_and_preserve_redo_on_motion() {
+    let mut buffer = TextBuffer::new("one two");
+    buffer.insert("!").unwrap();
+    buffer.undo().unwrap();
+    let history = buffer.history_stats();
+    buffer.move_cursor(Movement::PreviousWord, true).unwrap();
+    assert_eq!(buffer.history_stats(), history);
+    buffer.set_preedit("draft", None).unwrap();
+    let selection = buffer.selection();
+    assert_eq!(
+        buffer.move_cursor(Movement::PreviousWord, false),
+        Err(EditError::CompositionActive)
+    );
+    assert_eq!(
+        buffer.move_cursor(Movement::NextWord, true),
+        Err(EditError::CompositionActive)
+    );
+    assert_eq!(
+        buffer.delete_previous_word(),
+        Err(EditError::CompositionActive)
+    );
+    assert_eq!(buffer.delete_next_word(), Err(EditError::CompositionActive));
+    assert_eq!(buffer.text(), "one two");
+    assert_eq!(buffer.selection(), selection);
+    assert_eq!(buffer.history_stats(), history);
+    assert_eq!(buffer.preedit().unwrap().text(), "draft");
+}
+
+#[test]
+fn word_steps_and_deletions_from_every_grapheme_make_progress_without_splitting_clusters() {
+    for text in [
+        "",
+        " \r\n\t",
+        "can't 32.3,日🇯🇵👩🏽‍💻",
+        "e\u{301} \u{301}क्‍ष العربية",
+        "\r\u{301}\n🇯x🇵",
+    ] {
+        let offsets = text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain([text.len()]);
+        for offset in offsets {
+            for (movement, forward) in [(Movement::PreviousWord, false), (Movement::NextWord, true)]
+            {
+                let mut buffer = TextBuffer::new(text);
+                buffer.set_selection(Selection::caret(offset)).unwrap();
+                buffer.move_cursor(movement, false).unwrap();
+                let head = buffer.selection().head;
+                assert!(boundary(text, head));
+                assert!(if forward {
+                    head > offset || offset == text.len()
+                } else {
+                    head < offset || offset == 0
+                });
+                buffer.set_selection(Selection::caret(offset)).unwrap();
+                if forward {
+                    buffer.delete_next_word().unwrap();
+                } else {
+                    buffer.delete_previous_word().unwrap();
+                }
+                assert!(boundary(buffer.text(), buffer.selection().head));
+                if buffer.history_stats().undo_edits > 0 {
+                    buffer.undo().unwrap();
+                    assert_eq!(buffer.text(), text);
+                    assert_eq!(buffer.selection(), Selection::caret(offset));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn display_selection_projects_preedit_without_changing_document_offsets() {
     let mut buffer = TextBuffer::new("a OLD z");
     buffer.set_selection(Selection::new(5, 2)).unwrap();

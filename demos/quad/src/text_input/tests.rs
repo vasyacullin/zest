@@ -1,5 +1,94 @@
 use super::*;
 
+fn word_modifier() -> ModifiersState {
+    if cfg!(target_os = "macos") {
+        ModifiersState::ALT
+    } else {
+        ModifiersState::CONTROL
+    }
+}
+
+#[test]
+fn word_shortcuts_route_navigation_and_delete_as_single_undo_steps() {
+    let mut input = TextInput::new("one e\u{301} 👩🏽‍💻");
+    input.focus(true);
+    input.modifiers = word_modifier() | ModifiersState::SHIFT;
+    for (key, movement) in [
+        (NamedKey::ArrowLeft, Navigation::WordLeft),
+        (NamedKey::ArrowRight, Navigation::WordRight),
+    ] {
+        let result = input
+            .key(&named(key), Some("incidental"), true, false)
+            .unwrap();
+        assert_eq!(result.navigation, Some(movement));
+        assert!(!result.changed);
+    }
+    let original = input.buffer.text().to_owned();
+    let selection = input.buffer.selection();
+    let result = input
+        .key(&named(NamedKey::Backspace), Some("incidental"), true, false)
+        .unwrap();
+    assert!(result.changed && result.reveal_caret);
+    assert_eq!(input.buffer.text(), "one e\u{301} ");
+    assert_eq!(input.buffer.history_stats().undo_edits, 1);
+    input.buffer.undo().unwrap();
+    assert_eq!(input.buffer.text(), original);
+    assert_eq!(input.buffer.selection(), selection);
+    input
+        .buffer
+        .set_selection(zest::text::Selection::caret(3))
+        .unwrap();
+    input
+        .key(&named(NamedKey::Delete), Some("incidental"), true, false)
+        .unwrap();
+    assert_eq!(input.buffer.text(), "one 👩🏽‍💻");
+}
+
+#[test]
+fn word_shortcuts_ignore_synthetic_released_unfocused_and_composing_input() {
+    let mut input = TextInput::new("one two");
+    input.modifiers = word_modifier();
+    for focused in [false, true] {
+        input.focus(focused);
+        for (pressed, synthetic) in [(false, false), (true, true), (focused, false)] {
+            if focused && pressed && !synthetic {
+                continue;
+            }
+            for key in [
+                NamedKey::ArrowLeft,
+                NamedKey::ArrowRight,
+                NamedKey::Backspace,
+                NamedKey::Delete,
+            ] {
+                assert_eq!(
+                    input
+                        .key(&named(key), Some("incidental"), pressed, synthetic)
+                        .unwrap(),
+                    KeyResult::default()
+                );
+            }
+        }
+    }
+    input.ime(&Ime::Enabled).unwrap();
+    input.ime(&Ime::Preedit("draft".into(), None)).unwrap();
+    for key in [
+        NamedKey::ArrowLeft,
+        NamedKey::ArrowRight,
+        NamedKey::Backspace,
+        NamedKey::Delete,
+    ] {
+        assert_eq!(
+            input
+                .key(&named(key), Some("incidental"), true, false)
+                .unwrap(),
+            KeyResult::default()
+        );
+    }
+    assert_eq!(input.buffer.text(), "one two");
+    assert_eq!(input.buffer.display_text(), "one twodraft");
+    assert_eq!(input.buffer.history_stats().undo_edits, 0);
+}
+
 #[test]
 fn clipboard_shortcuts_use_physical_keys_and_require_real_focused_input_without_preedit() {
     let mut input = TextInput::new("Привет");

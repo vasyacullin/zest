@@ -2,6 +2,114 @@ use super::*;
 use crate::clipboard::MemoryClipboard;
 use winit::dpi::PhysicalPosition;
 
+fn word_modifier() -> ModifiersState {
+    if cfg!(target_os = "macos") {
+        ModifiersState::ALT
+    } else {
+        ModifiersState::CONTROL
+    }
+}
+
+#[test]
+fn word_selection_keeps_the_paragraph_and_history_and_resets_vertical_goal() {
+    let mut editor = editor("one two\nabcdefghij\nx\nabcdefghij");
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(0)))
+        .unwrap();
+    let snapshot = editor
+        .paragraph
+        .layout_selection(Selection::caret(0))
+        .unwrap();
+    let history = editor.input.buffer.history_stats();
+    editor.uploaded = true;
+    editor.modifiers(word_modifier() | ModifiersState::SHIFT);
+    editor
+        .key(&Key::Named(NamedKey::ArrowRight), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(0, 3));
+    editor
+        .key(&Key::Named(NamedKey::ArrowRight), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::new(0, 7));
+    editor.modifiers(word_modifier());
+    editor
+        .key(&Key::Named(NamedKey::ArrowLeft), None, true, false)
+        .unwrap();
+    assert_eq!(editor.input.buffer.selection(), Selection::caret(0));
+    assert_eq!(editor.input.buffer.history_stats(), history);
+    assert!(editor.uploaded);
+    assert!(editor.paragraph.selection_caret(&snapshot).is_ok());
+
+    editor
+        .edit(|input| input.buffer.set_selection(Selection::caret(16)))
+        .unwrap();
+    editor.modifiers(ModifiersState::empty());
+    editor
+        .key(&Key::Named(NamedKey::ArrowDown), None, true, false)
+        .unwrap();
+    editor.modifiers(word_modifier());
+    editor
+        .key(&Key::Named(NamedKey::ArrowLeft), None, true, false)
+        .unwrap();
+    let x = editor.current_caret().unwrap().x;
+    editor.modifiers(ModifiersState::empty());
+    editor
+        .key(&Key::Named(NamedKey::ArrowDown), None, true, false)
+        .unwrap();
+    assert!((editor.current_caret().unwrap().x - x).abs() < 1e-4);
+}
+
+#[test]
+fn no_op_word_deletion_reveals_the_caret_but_ignored_events_leave_manual_scroll() {
+    let mut editor = editor(&"one\n".repeat(12));
+    let selection = editor.input.buffer.selection();
+    let history = editor.input.buffer.history_stats();
+    editor
+        .wheel(
+            MouseScrollDelta::LineDelta(0.0, 1e6),
+            ScaleFactor::default(),
+        )
+        .unwrap();
+    assert_eq!(editor.scroll_y, 0.0);
+    editor.modifiers(word_modifier());
+    for (pressed, synthetic) in [(false, false), (true, true)] {
+        let result = editor
+            .key(&Key::Named(NamedKey::Delete), None, pressed, synthetic)
+            .unwrap();
+        assert!(!result.changed && !result.reveal_caret);
+        assert_eq!(editor.scroll_y, 0.0);
+    }
+    assert!(
+        editor
+            .key(&Key::Named(NamedKey::Delete), None, true, false)
+            .unwrap()
+            .changed
+    );
+    assert!(editor.scroll_y > 0.0);
+    assert_eq!(editor.input.buffer.selection(), selection);
+    assert_eq!(editor.input.buffer.history_stats(), history);
+}
+
+#[test]
+fn word_deletion_layout_failure_retains_the_document_history_and_snapshot() {
+    let text = format!("{}\n{}", "W".repeat(140), "W".repeat(140));
+    let mut editor = editor(&text);
+    let selection = Selection::new(141, 140);
+    editor
+        .edit(|input| input.buffer.set_selection(selection))
+        .unwrap();
+    let snapshot = editor.paragraph.layout_selection(selection).unwrap();
+    let history = editor.input.buffer.history_stats();
+    editor.modifiers(word_modifier());
+    for key in [NamedKey::Backspace, NamedKey::Delete] {
+        assert!(editor.key(&Key::Named(key), None, true, false).is_err());
+        assert_eq!(editor.input.buffer.text(), text);
+        assert_eq!(editor.input.buffer.selection(), selection);
+        assert_eq!(editor.input.buffer.history_stats(), history);
+        assert!(editor.paragraph.selection_caret(&snapshot).is_ok());
+    }
+}
+
 #[test]
 fn copying_a_reversed_unicode_selection_is_observational_and_empty_selection_does_not_write() {
     let mut editor = editor("a e\u{301} 👩🏽‍💻 z");

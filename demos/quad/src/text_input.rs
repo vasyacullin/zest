@@ -13,6 +13,8 @@ pub(super) struct KeyResult {
     pub reset_ime: bool,
     pub navigation: Option<Navigation>,
     pub clipboard: Option<ClipboardAction>,
+    /// An accepted deletion also reveals the caret when it changes no text.
+    pub reveal_caret: bool,
 }
 
 #[derive(Clone)]
@@ -124,6 +126,31 @@ impl TextInput {
             self.modifiers.control_key()
         };
         let shortcut = primary && !self.modifiers.alt_key();
+        let word = if cfg!(target_os = "macos") {
+            self.modifiers.alt_key() && !self.modifiers.control_key() && !self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key() && !self.modifiers.alt_key() && !self.modifiers.super_key()
+        };
+        if word {
+            match key {
+                Key::Named(NamedKey::ArrowLeft) => result.navigation = Some(Navigation::WordLeft),
+                Key::Named(NamedKey::ArrowRight) => result.navigation = Some(Navigation::WordRight),
+                Key::Named(NamedKey::Backspace) => {
+                    result.reveal_caret = true;
+                    result.changed = self.buffer.delete_previous_word()?;
+                }
+                Key::Named(NamedKey::Delete) => {
+                    result.reveal_caret = true;
+                    result.changed = self.buffer.delete_next_word()?;
+                }
+                _ => {}
+            }
+            if result.navigation.is_some()
+                || matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete))
+            {
+                return Ok(result);
+            }
+        }
         if !self.modifiers.alt_key() && (!self.modifiers.super_key() || cfg!(target_os = "macos")) {
             result.navigation = match key {
                 Key::Named(NamedKey::Home) => Some(if primary {
@@ -203,6 +230,7 @@ impl TextInput {
         {
             return Ok(result);
         }
+        result.reveal_caret = matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete));
         result.changed = match key {
             Key::Named(NamedKey::Backspace) => self.buffer.backspace()?,
             Key::Named(NamedKey::Delete) => self.buffer.delete_forward()?,

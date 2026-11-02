@@ -30,9 +30,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     buffer.cancel_preedit();
     assert_eq!(buffer.display_text(), committed);
     println!("Mixed Unicode document: {}", buffer.text());
+    buffer.move_cursor(Movement::PreviousWord, true)?;
+    assert_eq!(buffer.selected_text(), "שלום");
+    let selected = buffer.selection();
+    buffer.delete_previous_word()?;
+    assert_eq!(buffer.text(), "日本語 e\u{301} 🇯🇵 ");
+    buffer.undo()?;
+    assert_eq!(buffer.text(), committed);
+    assert_eq!(buffer.selection(), selected);
+    buffer.move_cursor(Movement::DocumentStart, false)?;
+    buffer.delete_next_word()?;
+    assert_eq!(buffer.text(), "本語 e\u{301} 🇯🇵 שלום");
+    buffer.undo()?;
+    assert_eq!(buffer.text(), committed);
     println!("History: {:?}", buffer.history_stats());
     println!(
-        "Text model smoke passed: graphemes, directional selection, IME commit/cancel and undo/redo."
+        "Text model smoke passed: graphemes, Unicode word motion/deletion, directional selection, IME commit/cancel and undo/redo."
     );
     Ok(())
 }

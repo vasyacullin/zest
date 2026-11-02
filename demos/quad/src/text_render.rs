@@ -205,7 +205,7 @@ impl TextDemo {
         synthetic: bool,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
         let result = self.edit(|input| input.key(key, text, pressed, synthetic))?;
-        self.finish_key(key, pressed, synthetic, result)
+        self.finish_key(result)
     }
     pub fn key_physical(
         &mut self,
@@ -217,13 +217,10 @@ impl TextDemo {
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
         let result =
             self.edit(|input| input.key_physical(key, physical, text, pressed, synthetic))?;
-        self.finish_key(key, pressed, synthetic, result)
+        self.finish_key(result)
     }
     fn finish_key(
         &mut self,
-        key: &Key,
-        pressed: bool,
-        synthetic: bool,
         mut result: KeyResult,
     ) -> Result<KeyResult, Box<dyn std::error::Error>> {
         if let Some(movement) = result.navigation {
@@ -252,17 +249,7 @@ impl TextDemo {
         }
         // A no-op deletion still reveals an offscreen caret after manual
         // scrolling. Layout navigation (including no-ops) is handled above.
-        let navigation = matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete));
-        let blocked = self.input.modifiers.super_key()
-            || (self.input.modifiers.control_key() && !self.input.modifiers.alt_key());
-        if !result.changed
-            && navigation
-            && pressed
-            && !synthetic
-            && !blocked
-            && self.input.focused
-            && self.input.buffer.preedit().is_none()
-        {
+        if !result.changed && result.reveal_caret {
             let before = (self.scroll_x, self.scroll_y);
             self.follow_caret = true;
             self.update_view()?;
@@ -1043,13 +1030,94 @@ pub(super) fn check_editor(renderer: &mut Renderer) -> Result<(), Box<dyn std::e
     {
         return Err("clipboard cut did not undo as one edit".into());
     }
+    let words = "one e\u{301} two\nواحد اثنان";
+    editor.edit(|input| {
+        input.buffer.select_all()?;
+        input.buffer.insert(words)?;
+        input.buffer.set_selection(Selection::caret(0))
+    })?;
+    editor.prepare(renderer, 1.25)?;
+    let image = editor.image;
+    let staged = renderer.upload_stats().staged_bytes;
+    let history = editor.input.buffer.history_stats();
+    let word_modifier = if cfg!(target_os = "macos") {
+        ModifiersState::ALT
+    } else {
+        ModifiersState::CONTROL
+    };
+    editor.modifiers(word_modifier | ModifiersState::SHIFT);
+    editor.key(&Key::Named(NamedKey::ArrowRight), None, true, false)?;
+    if editor.input.buffer.selection() != Selection::new(0, 3) {
+        return Err("word shortcut did not select the first word".into());
+    }
+    editor.prepare(renderer, 1.25)?;
+    let capture = capture_editor(&editor, renderer)?;
+    let selected = editor
+        .paragraph
+        .selection_geometry(editor.current_navigation().unwrap())?[0];
+    let selected = editor.rect(selected);
+    expect_pixel(
+        &capture,
+        ((selected.origin.x + selected.size.width * 0.5) * 1.25).floor() as u32,
+        ((selected.origin.y + selected.size.height - 1.5) * 1.25).floor() as u32,
+        [63, 124, 179, 255],
+    )?;
+    editor.modifiers(word_modifier);
+    editor.key(&Key::Named(NamedKey::ArrowRight), None, true, false)?;
+    editor.prepare(renderer, 1.25)?;
+    if editor.input.buffer.selection() != Selection::caret(3)
+        || editor.input.buffer.history_stats() != history
+        || editor.image != image
+        || renderer.upload_stats().staged_bytes != staged
+    {
+        return Err("word selection/collapse changed history or uploaded text".into());
+    }
+    editor.key(&Key::Named(NamedKey::Backspace), None, true, false)?;
+    if editor.input.buffer.text() != " e\u{301} two\nواحد اثنان"
+        || editor.input.buffer.history_stats().undo_edits != history.undo_edits + 1
+    {
+        return Err("word deletion did not produce one history edit".into());
+    }
+    editor.prepare(renderer, 1.25)?;
+    capture_editor(&editor, renderer)?;
+    editor.modifiers(command);
+    editor.key(&Key::Character("z".into()), None, true, false)?;
+    editor.prepare(renderer, 1.25)?;
+    if editor.input.buffer.text() != words || editor.input.buffer.selection() != Selection::caret(3)
+    {
+        return Err("word deletion undo lost text or original caret".into());
+    }
+    let rtl_start = "one e\u{301} two\n".len();
+    editor.edit(|input| input.buffer.set_selection(Selection::caret(rtl_start)))?;
+    let before = editor.current_caret()?;
+    let image = editor.image;
+    let staged = renderer.upload_stats().staged_bytes;
+    editor.modifiers(word_modifier);
+    editor.key(&Key::Named(NamedKey::ArrowLeft), None, true, false)?;
+    editor.prepare(renderer, 1.25)?;
+    let capture = capture_editor(&editor, renderer)?;
+    let caret = editor.current_caret()?;
+    if editor.input.buffer.selection().head <= rtl_start
+        || caret.x >= before.x
+        || editor.image != image
+        || renderer.upload_stats().staged_bytes != staged
+    {
+        return Err("RTL word-left lost visual direction or uploaded text".into());
+    }
+    let caret = editor.rect(caret);
+    expect_pixel(
+        &capture,
+        (caret.origin.x * 1.25 - 0.5).ceil() as u32,
+        ((caret.origin.y + caret.size.height * 0.5) * 1.25).floor() as u32,
+        [255; 4],
+    )?;
     renderer.remove_image(editor.image.unwrap())?;
     renderer.wait_idle()?;
     if renderer.image_stats().live != live || renderer.image_stats().retired != 0 {
         return Err("editor image replacement leaked textures".into());
     }
     println!(
-        "GPU editor checks passed: selection/caret/preedit pixels, drag/wheel/visual navigation without texture uploads, vertical goal column, wrap affinity, IME undo, memory clipboard copy/cut/paste and write failure, scrolling and texture retirement"
+        "GPU editor checks passed: selection/caret/preedit pixels, drag/wheel/visual word navigation without texture uploads, word deletion/undo, vertical goal column, wrap affinity, IME undo, memory clipboard copy/cut/paste and write failure, scrolling and texture retirement"
     );
     Ok(())
 }
