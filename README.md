@@ -68,7 +68,10 @@ checks render 129 quads in one draw, test nested clips and reversed painter orde
 grow/reuse buffers, and check every pixel in a clear-only capture. The first two
 onscreen frames test empty slots before their first vertex buffer allocation.
 Image checks cover padded RGBA upload, UV crop/orientation, clipping, tint/alpha,
-material order, adjacent batching, stale/foreign handles and fence retirement. To save
+material order, adjacent batching, stale/foreign handles and fence retirement.
+Smoke uses a 4 KiB texture upload ring, uploads 64 retained images through repeated
+wraps, verifies every image in a later grid, and checks oversized dedicated
+staging followed by another ring upload. To save
 the demo display list rendered offscreen as PPM:
 
 ```sh
@@ -88,7 +91,7 @@ invariants and Clippy checks for safety comments. Core, facade and demos retain
 their unsafe-code prohibition. If GPU completion cannot be established during
 shutdown, the owner retains native resources until process exit rather than
 free storage that might still be in use. Terminal HAL failures require recreating
-the renderer. An upload ring, texture atlases, backend
+the renderer. Texture atlases, backend
 fallback and device recovery remain future work; this is an initial HAL slice.
 
 ## Display lists and rectangular clipping
@@ -136,11 +139,33 @@ The shader decodes sRGB through the texture format and premultiplies after
 sampling. Bilinear filtering, image-file decoding, atlases and async loading
 are not implemented yet.
 
-Upload row pitch is aligned to the adapter requirement; padding is initialized,
-noncoherent memory is flushed, and texture usage transitions from UNINITIALIZED
-through COPY_DST to RESOURCE. Staging buffers and command buffers remain in a
-frame slot until its fence completes. Uploads and rendering share a queue/fence,
-so a draw observes earlier uploads without a whole-device idle wait per image.
+Upload row pitch and source offsets honor adapter alignment; padding is
+initialized, noncoherent memory is flushed, and texture usage transitions from
+UNINITIALIZED through COPY_DST to RESOURCE. Uploads and rendering share a
+queue/fence, so a draw observes earlier uploads without a whole-device idle wait
+per image.
+
+Texture staging uses one bounded, reusable upload ring (4 MiB by default).
+`Renderer::with_options` accepts `RendererOptions { upload_ring_capacity }` for
+a different power-of-two capacity, at least 256 bytes and within adapter limits.
+Only successfully submitted ranges consume ring space. Completed fence values
+reclaim ranges; if the ring is full, allocation waits for the oldest submitted
+range. Wraps never overwrite pending bytes. A single upload larger than the ring
+uses a dedicated staging buffer retained by its frame slot until completion and
+recycling. The ring itself remains alive through shutdown after GPU idle.
+
+On coherent memory, CPU writes and pending GPU reads use disjoint protected
+ranges. On noncoherent memory, writes conservatively wait for all previous ring
+reads before mapping/flushing, because HAL does not expose the memory atom size.
+Mapping guards unmap on normal return and error/unwind. Vertex staging continues
+to reuse the separate per-frame buffers.
+
+`upload_stats()` reports cumulative ring allocations/uploads, staged bytes
+(including row padding), wraps, fence-wait calls, dedicated allocations and
+coherence. Pending bytes are CPU-tracked submitted ranges, which may have already
+completed on hardware; `wait_idle()` reclaims them. Counters include the internal
+white texture upload. Ring capacity bounds shared texture staging, not total
+renderer memory or the oversized fallback allocations.
 
 `remove_image(id)` invalidates the handle immediately and queues native resources
 for retirement after their last upload/draw submission completes. Later rendering,

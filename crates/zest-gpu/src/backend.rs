@@ -1,10 +1,13 @@
 //! All HAL unsafety lives here. The wrapper owns every resource and the window,
 //! serializes queue access, and waits before recycling or destroying GPU data.
 use crate::batch::{Batch, STRIDE, VERTEX_BYTES, prepare};
-use crate::{Capture, FrameStats, RenderError, RenderStatus, SurfaceWindow, error};
+use crate::{
+    Capture, FrameStats, RenderError, RenderStatus, RendererOptions, SurfaceWindow, error,
+};
 use zest_core::resource::ResourceArena;
 use zest_paint::{ImageId, ImageResource, Primitive};
 mod images;
+mod upload;
 use images::TextureResource;
 use std::{
     borrow::{Borrow, Cow},
@@ -12,6 +15,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use upload::UploadRing;
 use wgpu_hal::{
     self as hal, Adapter as _, CommandEncoder as _, Device as _, Instance as _, Queue as _,
     Surface as _,
@@ -86,6 +90,7 @@ struct State<A: hal::Api> {
     images: ResourceArena<ImageResource, TextureResource<A>>,
     retired: Vec<TextureResource<A>>,
     white: Option<ImageId>,
+    upload_ring: UploadRing<A>,
     queue: A::Queue,
     device: A::Device,
     surface: A::Surface,
@@ -113,6 +118,7 @@ impl<A: hal::Api> Gpu<A> {
         window: Arc<dyn SurfaceWindow>,
         width: u32,
         height: u32,
+        options: RendererOptions,
     ) -> Result<Self, RenderError> {
         let display = window
             .display_handle()
@@ -199,6 +205,17 @@ impl<A: hal::Api> Gpu<A> {
                 "no device supports default limits, an sRGB color target and FIFO presentation",
             )
         })?;
+        let upload_alignment = exposed
+            .capabilities
+            .alignments
+            .buffer_copy_offset
+            .get()
+            .max(4);
+        upload::validate_capacity(
+            options.upload_ring_capacity,
+            limits.max_buffer_size,
+            upload_alignment,
+        )?;
         // SAFETY: requested limits were checked and no optional features are used.
         let hal::OpenDevice { device, queue } = unsafe {
             exposed.adapter.open(
@@ -244,6 +261,7 @@ impl<A: hal::Api> Gpu<A> {
                 images: ResourceArena::default(),
                 retired: Vec::new(),
                 white: None,
+                upload_ring: UploadRing::new(options.upload_ring_capacity, upload_alignment),
                 queue,
                 device,
                 surface,
@@ -278,7 +296,10 @@ impl<A: hal::Api> Gpu<A> {
     }
     pub(crate) fn wait_idle(&mut self) -> Result<(), RenderError> {
         let state = self.state.as_mut().unwrap();
-        let result = state.wait_idle().and_then(|_| state.collect_retired());
+        let result = state
+            .wait_idle()
+            .and_then(|_| state.collect_retired())
+            .and_then(|_| state.reclaim_uploads());
         if result.is_err() {
             state.failed = true;
         }
@@ -582,6 +603,7 @@ impl<A: hal::Api> State<A> {
             ));
         }
         self.wait_idle().inspect_err(|_| self.failed = true)?;
+        self.reclaim_uploads().inspect_err(|_| self.failed = true)?;
         for index in 0..self.frames.len() {
             self.recycle(index);
         }
@@ -867,6 +889,9 @@ impl<A: hal::Api> State<A> {
         // Commands/views are recycled first, then buffers and encoders, then
         // pipelines/layout/shader/fence; unconfigure precedes device destruction.
         unsafe {
+            if let Some(buffer) = self.upload_ring.buffer.take() {
+                self.device.destroy_buffer(buffer);
+            }
             for frame in &mut self.frames {
                 if let Some(buffer) = frame.vertex.take() {
                     self.device.destroy_buffer(buffer);

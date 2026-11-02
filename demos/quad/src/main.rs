@@ -12,7 +12,7 @@ use winit::{
 };
 use zest::{
     geometry::{Logical, Point, Rect, ScaleFactor},
-    gpu::{Capture, Quad, RenderStatus, Renderer},
+    gpu::{Capture, Quad, RenderStatus, Renderer, RendererOptions},
     paint::{DisplayList, Image, ImageId, PaintError},
 };
 
@@ -128,6 +128,7 @@ impl App {
                 check_pixels(renderer)?;
                 check_batch_pixels(renderer)?;
                 image_checks::check(renderer)?;
+                upload_checks::check(renderer)?;
                 if let Some(path) = &self.capture_path {
                     let size = window.inner_size();
                     let capture = renderer.capture_list(&list, scale, size.width, size.height)?;
@@ -352,7 +353,18 @@ impl ApplicationHandler for App {
                 )?,
             );
             let size = window.inner_size();
-            let mut renderer = Renderer::new(window.clone(), size.width, size.height)?;
+            let mut renderer = if self.smoke {
+                Renderer::with_options(
+                    window.clone(),
+                    size.width,
+                    size.height,
+                    RendererOptions {
+                        upload_ring_capacity: 4096,
+                    },
+                )?
+            } else {
+                Renderer::new(window.clone(), size.width, size.height)?
+            };
             let pixels: Vec<_> = (0..16)
                 .flat_map(|y| {
                     (0..16).flat_map(move |x| {
@@ -524,3 +536,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 mod image_checks;
+mod upload_checks;

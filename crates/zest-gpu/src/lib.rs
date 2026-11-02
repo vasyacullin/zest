@@ -1,7 +1,8 @@
 //! Experimental direct HAL quad batches with two reusable frame slots.
 //! Vulkan on Windows/Linux; Metal on Apple targets. Adjacent compatible materials
 //! batch without changing painter order. Supports rectangular clips and nearest
-//! RGBA8 images; widget rendering, text, device recovery and fallback are pending.
+//! RGBA8 images with bounded upload-ring staging. Widget rendering, text, device
+//! recovery and backend fallback are pending.
 #![deny(unsafe_code)]
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -56,6 +57,36 @@ pub struct ImageStats {
     pub retired: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RendererOptions {
+    /// Bounded texture staging ring; power of two, at least 256 bytes and within
+    /// adapter limits. Larger individual uploads use dedicated staging.
+    pub upload_ring_capacity: u64,
+}
+impl Default for RendererOptions {
+    fn default() -> Self {
+        Self {
+            upload_ring_capacity: 4 * 1024 * 1024,
+        }
+    }
+}
+
+/// Cumulative CPU counters for texture staging. Pending bytes are submitted
+/// ranges not yet reclaimed by the CPU; hardware may already have completed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UploadStats {
+    pub capacity: u64,
+    pub buffer_allocations: u64,
+    pub ring_uploads: u64,
+    pub staged_bytes: u64,
+    pub pending_bytes: u64,
+    pub peak_pending_bytes: u64,
+    pub wraps: u64,
+    pub waits: u64,
+    pub dedicated_allocations: u64,
+    pub coherent: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderStatus {
     Presented,
@@ -89,8 +120,18 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Self, RenderError> {
+        Self::with_options(window, width, height, RendererOptions::default())
+    }
+
+    /// Creates a renderer with an explicit bounded texture staging budget.
+    pub fn with_options<W: SurfaceWindow + 'static>(
+        window: Arc<W>,
+        width: u32,
+        height: u32,
+        options: RendererOptions,
+    ) -> Result<Self, RenderError> {
         Ok(Self {
-            inner: backend::NativeRenderer::new(window, width, height)?,
+            inner: backend::NativeRenderer::new(window, width, height, options)?,
             thread: PhantomData,
         })
     }
@@ -172,6 +213,10 @@ impl Renderer {
     pub fn image_stats(&self) -> ImageStats {
         self.inner.image_stats()
     }
+    pub fn upload_stats(&self) -> UploadStats {
+        self.inner.upload_stats()
+    }
 }
 
 mod batch;
+mod upload_ring;

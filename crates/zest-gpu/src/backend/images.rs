@@ -170,14 +170,24 @@ impl<A: hal::Api> State<A> {
         let next = value
             .checked_add(1)
             .ok_or_else(|| error("image upload", "fence value exhausted"))?;
+        let staging = self.stage_texture(
+            index,
+            upload::Pixels {
+                width,
+                height,
+                pitch,
+                size,
+                data: pixels,
+            },
+        )?;
         // Store partially created resources in the owner before fallible calls.
         // Any HAL failure makes the renderer terminal; shutdown waits/cleans all.
         let id = self.images.insert(TextureResource::default());
         let image = self.images.get_mut(&id).unwrap();
         let frame = &mut self.frames[index];
         // SAFETY: checked dimensions, byte count, row pitch and buffer limits.
-        // Map/flush cover the complete owned staging buffer. No prior slot work
-        // remains. Texture has one initialized mip/layer before shader access.
+        // Staging is prepared above, with its range protected until submission
+        // completion. The texture gets one initialized mip/layer before use.
         unsafe {
             image.texture = Some(
                 self.device
@@ -240,35 +250,14 @@ impl<A: hal::Api> State<A> {
                     })
                     .map_err(|e| error("image group", e))?,
             );
-            frame.texture_staging = Some(
-                self.device
-                    .create_buffer(&hal::BufferDescriptor {
-                        label: Some("texture staging"),
-                        size,
-                        usage: wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
-                        memory_flags: hal::MemoryFlags::PREFER_COHERENT,
-                    })
-                    .map_err(|e| error("texture staging", e))?,
-            );
-            let buffer = frame.texture_staging.as_ref().unwrap();
-            let mapping = self
-                .device
-                .map_buffer(buffer, 0..size)
-                .map_err(|e| error("texture mapping", e))?;
-            std::ptr::write_bytes(mapping.ptr.as_ptr(), 0, size as usize);
-            for row in 0..height as usize {
-                std::ptr::copy_nonoverlapping(
-                    pixels.as_ptr().add(row * width as usize * 4),
-                    mapping.ptr.as_ptr().add(row * pitch as usize),
-                    width as usize * 4,
-                );
-            }
-            if !mapping.is_coherent {
-                self.device
-                    .flush_mapped_ranges(buffer, std::iter::once(0..size));
-            }
-            self.device.unmap_buffer(buffer);
         }
+        let source = if staging.is_some() {
+            self.upload_ring.buffer.as_ref().unwrap()
+        } else {
+            frame.texture_staging.as_ref().unwrap()
+        };
+        let offset = staging.map_or(0, |range| range.offset);
+        let source_initialized = staging.is_some() && self.upload_ring.initialized;
         let encoder = frame.encoder.as_mut().unwrap();
         // SAFETY: encoder is closed and all its previous commands were recycled.
         unsafe { encoder.begin_encoding(Some("upload image")) }
@@ -278,9 +267,13 @@ impl<A: hal::Api> State<A> {
         let command = unsafe {
             let texture = image.texture.as_ref().unwrap();
             encoder.transition_buffers(std::iter::once(hal::BufferBarrier {
-                buffer: frame.texture_staging.as_ref().unwrap(),
+                buffer: source,
                 usage: hal::StateTransition {
-                    from: wgt::BufferUses::empty(),
+                    from: if source_initialized {
+                        wgt::BufferUses::COPY_SRC
+                    } else {
+                        wgt::BufferUses::empty()
+                    },
                     to: wgt::BufferUses::COPY_SRC,
                 },
             }));
@@ -293,11 +286,11 @@ impl<A: hal::Api> State<A> {
                 },
             }));
             encoder.copy_buffer_to_texture(
-                frame.texture_staging.as_ref().unwrap(),
+                source,
                 texture,
                 std::iter::once(hal::BufferTextureCopy {
                     buffer_layout: wgt::TexelCopyBufferLayout {
-                        offset: 0,
+                        offset,
                         bytes_per_row: Some(pitch),
                         rows_per_image: Some(height),
                     },
@@ -346,6 +339,9 @@ impl<A: hal::Api> State<A> {
         .map_err(|e| error("image submit", e))?;
         frame.submitted = value;
         image.last_used = value;
+        if let Some(range) = staging {
+            self.upload_ring.commit(range, value)?;
+        }
         self.next_value = next;
         self.frame_index = (index + 1) % self.frames.len();
         Ok(id)
