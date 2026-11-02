@@ -19,6 +19,7 @@ jobs:
       - run: cargo test --workspace --all-features --locked
       - run: cargo check -p zest --no-default-features --locked
       - run: cargo run -p zest-headless --locked
+      - run: cargo run -p zest-text-demo --locked
       - run: cargo bench -p zest-core --bench reconciliation --locked -- --smoke
       - if: runner.os == 'Linux'
         name: Vulkan software smoke and pixel checks

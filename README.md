@@ -8,9 +8,11 @@ through `wgpu-hal`, targeting desktop and mobile applications and tools.
 The scene provides scoped widget identities,
 validation of scene/subtree declarations before mutation, persistent ECS nodes
 and interaction flags, plus typed coordinate spaces and DPI conversion.
-The separate GPU slice opens a window and renders ordered, clipped quad batches. Scene widgets
-are not yet connected to rendering; layout and text are still
-planned. See [plan.md](plan.md) for the full roadmap and acceptance criteria.
+The separate GPU slice opens a window and renders ordered, clipped quad batches.
+An optional text model provides Unicode editing, transient IME composition and
+bounded undo/redo. Scene widgets are not yet connected to rendering; layout,
+text shaping/rasterization and OS IME integration are still planned.
+See [plan.md](plan.md) for the full roadmap and acceptance criteria.
 
 ## Run
 
@@ -18,6 +20,7 @@ Install Rust 1.95 or newer, then run from this repository root:
 
 ```sh
 cargo run -p zest-headless
+cargo run -p zest-text-demo
 cargo run -p zest-quad
 cargo run -p zest-quad -- --smoke
 cargo test --workspace --all-features --locked
@@ -200,6 +203,57 @@ headless builds. It provides typed, arena-local generational identities; its
 owner controls actual destruction. Resource marker types prevent mixing kinds
 at compile time; exhausted generations retire slots instead of wrapping.
 
+## Unicode editing model
+
+Enable the facade's `text` feature to use `zest::text`, or depend directly on
+`zest-text`. It has no window, font, ECS or GPU dependencies. The deterministic
+console demo (`cargo run -p zest-text-demo`) checks editing and composition;
+it does not open a text editor window.
+
+```rust
+use zest::text::{Selection, TextBuffer};
+
+let mut text = TextBuffer::new("Привет 👩🏽‍💻");
+text.backspace().unwrap(); // the whole emoji is one deletion
+assert_eq!(text.text(), "Привет ");
+text.set_preedit("にほん", Some(Selection::caret("にほん".len()))).unwrap();
+assert_eq!(text.text(), "Привет "); // committed document is unchanged
+assert_eq!(text.display_text(), "Привет にほん");
+text.commit_preedit("日本");
+text.undo().unwrap(); // one transaction for the entire commit
+assert_eq!(text.text(), "Привет ");
+```
+
+`Selection` stores anchor/head as UTF-8 byte offsets and preserves direction.
+Document selections must lie on extended grapheme boundaries. Movement and
+deletion use [unicode-segmentation](https://docs.rs/unicode-segmentation/1.13.3/unicode_segmentation/)
+to keep combining marks, emoji sequences and CRLF together. New carets snap
+forward to a grapheme boundary after an edit merges adjacent clusters. Movement
+is in logical string order; visual bidi arrows, line navigation and hit testing
+require the future layout layer. Text and line endings are preserved verbatim.
+
+Preedit replaces the selected range only in `display_text()`. Its cursor is
+relative to the preedit string and may use any UTF-8 scalar boundary. Invalid
+document/preedit offsets return an error before mutation. During composition,
+document edits, navigation and undo/redo return `CompositionActive`; the host
+must commit or cancel first. An empty preedit cancels it. A commit may differ
+from the last preedit or arrive without one. Platform adapters will be responsible
+for focus changes, IME enablement and candidate-window positioning.
+
+Each actual replacement is one undo step, restoring text and directional
+selection. Cursor-only changes and identical replacements retain redo; a new
+text edit discards the redo branch. `HistoryLimits` bounds combined undo/redo by
+edit count and UTF-8 delta payload bytes (defaults: 128 edits / 1 MiB). It excludes
+allocation overhead and document/preedit storage. Oldest edits are evicted;
+an edit larger than the budget succeeds but clears history so stale deltas cannot
+be replayed. Zero in either limit disables history. `history_stats()` reports
+both stacks and their combined payload size.
+
+This initial `String` model scans grapheme boundaries and shifts text during
+edits. It is intended for short UI fields; it has no large-document performance
+claim. Font selection, shaping, glyph caching, text rendering, scrolling,
+clipboard and native IME event routing are not implemented yet.
+
 ## Scene updates
 
 `Scene::update` declares the complete scene. `Scene::update_children` declares all
@@ -289,7 +343,7 @@ button in a flat list requires declaring that list's other children.
 These timings cover CPU reconciliation only; frame time, GPU work, allocation
 counts and idle wakeups still need separate measurement. CI has no timing gate.
 
-CI is configured for formatting, Clippy, tests, the headless demo and benchmark
+CI is configured for formatting, Clippy, tests, the headless/text demos and benchmark
 smoke checks on Windows, Linux and macOS. Linux additionally runs the quad/pixel
 smoke under Xvfb with Mesa software Vulkan. A separate Linux job tests minimum
 Rust 1.95. Local GPU verification covers Windows/DX12 and Windows/Vulkan, including
@@ -303,8 +357,10 @@ not a report of a successful remote run.
 - `crates/zest-core`: private ECS implementation and public scene API.
 - `crates/zest-paint`: validated quad snapshots and nested rectangular clips.
 - `crates/zest-gpu`: experimental safe wrapper around direct HAL rendering.
+- `crates/zest-text`: Unicode editing, transient preedit and bounded delta history.
 - `demos/headless`: runnable reconciliation example.
 - `demos/quad`: window, clipped quad batches, hover, resize and GPU readback checks.
+- `demos/text`: deterministic console smoke for the Unicode editing model.
 - `examples`: external reference checkouts, excluded from the workspace.
 
 The default scene API forbids unsafe code. The HAL crate has its own narrowly

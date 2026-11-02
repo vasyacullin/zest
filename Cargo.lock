@@ -2756,6 +2756,7 @@ dependencies = [
  "zest-core",
  "zest-gpu",
  "zest-paint",
+ "zest-text",
 ]
 
 [[package]]
@@ -2797,5 +2798,19 @@ version = "0.1.0"
 dependencies = [
  "log",
  "winit",
+ "zest",
+]
+
+[[package]]
+name = "zest-text"
+version = "0.1.0"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "zest-text-demo"
+version = "0.1.0"
+dependencies = [
  "zest",
 ]
