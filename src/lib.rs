@@ -11,6 +11,7 @@
 //! # Ok::<(), zest::geometry::InvalidScaleFactor>(())
 //! ```
 pub use zest_core::geometry;
+pub use zest_core::resource;
 pub use zest_core::{
     NodeKind, ReconcileError, Scene, SceneStats, Ui, UpdateStats, WidgetId, WidgetState,
 };

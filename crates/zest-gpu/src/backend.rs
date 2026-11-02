@@ -1,9 +1,11 @@
 //! All HAL unsafety lives here. The wrapper owns every resource and the window,
 //! serializes queue access, and waits before recycling or destroying GPU data.
-use crate::{
-    Capture, FrameStats, Quad, RenderError, RenderStatus, SurfaceWindow, VERTEX_BYTES, error,
-    vertices,
-};
+use crate::batch::{Batch, STRIDE, VERTEX_BYTES, prepare};
+use crate::{Capture, FrameStats, RenderError, RenderStatus, SurfaceWindow, error};
+use zest_core::resource::ResourceArena;
+use zest_paint::{ImageId, ImageResource, Primitive};
+mod images;
+use images::TextureResource;
 use std::{
     borrow::{Borrow, Cow},
     num::NonZeroU64,
@@ -48,6 +50,7 @@ struct Frame<A: hal::Api> {
     vertex: Option<A::Buffer>,
     target: Option<A::Texture>,
     readback: Option<A::Buffer>,
+    texture_staging: Option<A::Buffer>,
     submitted: u64,
     capacity: u64,
     initialized: bool,
@@ -62,6 +65,7 @@ impl<A: hal::Api> Default for Frame<A> {
             vertex: None,
             target: None,
             readback: None,
+            texture_staging: None,
             submitted: 0,
             capacity: 0,
             initialized: false,
@@ -77,6 +81,11 @@ struct State<A: hal::Api> {
     layout: Option<A::PipelineLayout>,
     shader: Option<A::ShaderModule>,
     fence: Option<A::Fence>,
+    image_layout: Option<A::BindGroupLayout>,
+    sampler: Option<A::Sampler>,
+    images: ResourceArena<ImageResource, TextureResource<A>>,
+    retired: Vec<TextureResource<A>>,
+    white: Option<ImageId>,
     queue: A::Queue,
     device: A::Device,
     surface: A::Surface,
@@ -167,6 +176,19 @@ impl<A: hal::Api> Gpu<A> {
                 ) {
                     continue;
                 }
+                // SAFETY: querying the same live adapter for the fixed upload format.
+                let sampled = unsafe {
+                    exposed
+                        .adapter
+                        .texture_format_capabilities(wgt::TextureFormat::Rgba8UnormSrgb)
+                };
+                if !sampled.contains(
+                    hal::TextureFormatCapabilities::SAMPLED
+                        | hal::TextureFormatCapabilities::SAMPLED_LINEAR
+                        | hal::TextureFormatCapabilities::COPY_DST,
+                ) {
+                    continue;
+                }
                 selected = Some((exposed, caps, format));
                 break;
             }
@@ -217,6 +239,11 @@ impl<A: hal::Api> Gpu<A> {
                 layout: None,
                 shader: None,
                 fence: None,
+                image_layout: None,
+                sampler: None,
+                images: ResourceArena::default(),
+                retired: Vec::new(),
+                white: None,
                 queue,
                 device,
                 surface,
@@ -250,11 +277,16 @@ impl<A: hal::Api> Gpu<A> {
         self.state.as_mut().unwrap().resize(width, height)
     }
     pub(crate) fn wait_idle(&mut self) -> Result<(), RenderError> {
-        self.state.as_mut().unwrap().wait_idle()
+        let state = self.state.as_mut().unwrap();
+        let result = state.wait_idle().and_then(|_| state.collect_retired());
+        if result.is_err() {
+            state.failed = true;
+        }
+        result
     }
     pub(crate) fn render(
         &mut self,
-        quads: &[Quad],
+        primitives: &[Primitive],
         scale: ScaleFactor,
     ) -> Result<RenderStatus, RenderError> {
         let state = self.state.as_mut().unwrap();
@@ -267,14 +299,15 @@ impl<A: hal::Api> Gpu<A> {
         if !state.configured {
             return Ok(RenderStatus::Suspended);
         }
-        let bytes = vertices(
-            quads,
+        let batch = prepare(
+            primitives,
             scale,
             state.config.extent.width,
             state.config.extent.height,
             state.max_buffer_size,
         )?;
-        let result = state.render(&bytes);
+        state.validate_images(&batch)?;
+        let result = state.render(&batch);
         if result.is_err() {
             state.failed = true;
         }
@@ -283,7 +316,7 @@ impl<A: hal::Api> Gpu<A> {
 
     pub(crate) fn capture(
         &mut self,
-        quads: &[Quad],
+        primitives: &[Primitive],
         scale: ScaleFactor,
         width: u32,
         height: u32,
@@ -302,8 +335,9 @@ impl<A: hal::Api> Gpu<A> {
                 "nonzero dimensions within adapter limits are required",
             ));
         }
-        let bytes = vertices(quads, scale, width, height, state.max_buffer_size)?;
-        let result = state.capture(&bytes, width, height);
+        let batch = prepare(primitives, scale, width, height, state.max_buffer_size)?;
+        state.validate_images(&batch)?;
+        let result = state.capture(&batch, width, height);
         if result.is_err() {
             state.failed = true;
         }
@@ -314,8 +348,8 @@ impl<A: hal::Api> Gpu<A> {
 impl<A: hal::Api> State<A> {
     fn initialize(&mut self) -> Result<(), RenderError> {
         let naga_shader = shader()?;
-        // SAFETY: all descriptors are fixed and match the validated WGSL: two
-        // vertex attributes, no bindings, 24-byte vertices and one sRGB target.
+        // SAFETY: fixed descriptors match validated WGSL: position/UV/color,
+        // one sampled texture/sampler group, 32-byte vertices and one sRGB target.
         // Each successful allocation is stored immediately for failure cleanup.
         unsafe {
             self.shader = Some(
@@ -329,12 +363,53 @@ impl<A: hal::Api> State<A> {
                     )
                     .map_err(|e| error("shader module", e))?,
             );
+            self.image_layout = Some(
+                self.device
+                    .create_bind_group_layout(&hal::BindGroupLayoutDescriptor {
+                        label: Some("image layout"),
+                        flags: hal::BindGroupLayoutFlags::empty(),
+                        entries: &[
+                            wgt::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgt::ShaderStages::FRAGMENT,
+                                ty: wgt::BindingType::Texture {
+                                    sample_type: wgt::TextureSampleType::Float { filterable: true },
+                                    view_dimension: wgt::TextureViewDimension::D2,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgt::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgt::ShaderStages::FRAGMENT,
+                                ty: wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
+                                count: None,
+                            },
+                        ],
+                    })
+                    .map_err(|e| error("image layout", e))?,
+            );
+            self.sampler = Some(
+                self.device
+                    .create_sampler(&hal::SamplerDescriptor {
+                        label: Some("nearest image sampler"),
+                        address_modes: [wgt::AddressMode::ClampToEdge; 3],
+                        mag_filter: wgt::FilterMode::Nearest,
+                        min_filter: wgt::FilterMode::Nearest,
+                        mipmap_filter: wgt::MipmapFilterMode::Nearest,
+                        lod_clamp: 0.0..0.0,
+                        compare: None,
+                        anisotropy_clamp: 1,
+                        border_color: None,
+                    })
+                    .map_err(|e| error("image sampler", e))?,
+            );
             self.layout = Some(
                 self.device
                     .create_pipeline_layout(&hal::PipelineLayoutDescriptor {
                         label: Some("quad layout"),
                         flags: hal::PipelineLayoutFlags::empty(),
-                        bind_group_layouts: &[],
+                        bind_group_layouts: &[self.image_layout.as_ref()],
                         immediate_size: 0,
                     })
                     .map_err(|e| error("pipeline layout", e))?,
@@ -354,7 +429,7 @@ impl<A: hal::Api> State<A> {
                         vertex_processor: hal::VertexProcessor::Standard {
                             vertex_stage: stage("vs_main"),
                             vertex_buffers: &[Some(hal::VertexBufferLayout {
-                                array_stride: 24,
+                                array_stride: STRIDE as u64,
                                 step_mode: wgt::VertexStepMode::Vertex,
                                 attributes: &[
                                     wgt::VertexAttribute {
@@ -363,9 +438,14 @@ impl<A: hal::Api> State<A> {
                                         shader_location: 0,
                                     },
                                     wgt::VertexAttribute {
-                                        format: wgt::VertexFormat::Float32x4,
+                                        format: wgt::VertexFormat::Float32x2,
                                         offset: 8,
                                         shader_location: 1,
+                                    },
+                                    wgt::VertexAttribute {
+                                        format: wgt::VertexFormat::Float32x4,
+                                        offset: 16,
+                                        shader_location: 2,
                                     },
                                 ],
                             })],
@@ -398,6 +478,7 @@ impl<A: hal::Api> State<A> {
                 );
             }
         }
+        self.white = Some(self.upload_image(1, 1, &[255; 4])?);
         Ok(())
     }
 
@@ -422,6 +503,9 @@ impl<A: hal::Api> State<A> {
                 self.device.destroy_texture(texture);
             }
             if let Some(buffer) = frame.readback.take() {
+                self.device.destroy_buffer(buffer);
+            }
+            if let Some(buffer) = frame.texture_staging.take() {
                 self.device.destroy_buffer(buffer);
             }
         }
@@ -522,7 +606,9 @@ impl<A: hal::Api> State<A> {
         Ok(())
     }
 
-    fn render(&mut self, bytes: &[u8]) -> Result<RenderStatus, RenderError> {
+    fn render(&mut self, batch: &Batch) -> Result<RenderStatus, RenderError> {
+        self.collect_retired()?;
+        let bytes = &batch.bytes;
         let index = self.frame_index;
         let fence = self.fence.as_ref().unwrap();
         let submitted = self.frames[index].submitted;
@@ -579,13 +665,18 @@ impl<A: hal::Api> State<A> {
                 return Err(error("target view", e));
             }
         }
+        let draws = bind_draws(&self.images, self.white.unwrap(), batch);
         if let Err(e) = encode::<A>(
             frame,
             acquired.texture.borrow(),
-            self.pipeline.as_ref().unwrap(),
-            self.config.extent,
-            bytes.len(),
-            None,
+            Pass {
+                pipeline: self.pipeline.as_ref().unwrap(),
+                layout: self.layout.as_ref().unwrap(),
+                draws: &draws,
+                extent: self.config.extent,
+                byte_len: bytes.len(),
+                readback: None,
+            },
         ) {
             // SAFETY: encoding failed and was discarded; texture is not presented.
             unsafe {
@@ -612,18 +703,21 @@ impl<A: hal::Api> State<A> {
         }
         frame.submitted = value;
         frame.initialized |= !bytes.is_empty();
-        let stats = batch_stats(bytes, frame.capacity);
+        let stats = batch_stats(batch, frame.capacity);
         self.next_value = next;
         self.frame_index = (index + 1) % self.frames.len();
         // SAFETY: texture was submitted above in PRESENT state; this consumes
         // the sole acquisition. Queue access is serialized by &mut self.
         unsafe { self.queue.present(&self.surface, acquired.texture) }
             .map_err(|e| error("present", e))?;
+        self.mark_images_used(batch, value);
         self.last_stats = stats;
         Ok(RenderStatus::Presented)
     }
 
-    fn capture(&mut self, bytes: &[u8], width: u32, height: u32) -> Result<Capture, RenderError> {
+    fn capture(&mut self, batch: &Batch, width: u32, height: u32) -> Result<Capture, RenderError> {
+        self.collect_retired()?;
+        let bytes = &batch.bytes;
         let pitch =
             (u64::from(width) * 4).div_ceil(self.copy_pitch_alignment) * self.copy_pitch_alignment;
         let size = pitch * u64::from(height);
@@ -691,13 +785,18 @@ impl<A: hal::Api> State<A> {
         // Split borrows: target/readback stay owned in this slot throughout GPU use.
         let target = frame.target.take().unwrap();
         let readback = frame.readback.take().unwrap();
+        let draws = bind_draws(&self.images, self.white.unwrap(), batch);
         let encoded = encode::<A>(
             frame,
             &target,
-            self.pipeline.as_ref().unwrap(),
-            extent,
-            bytes.len(),
-            Some((&readback, pitch)),
+            Pass {
+                pipeline: self.pipeline.as_ref().unwrap(),
+                layout: self.layout.as_ref().unwrap(),
+                draws: &draws,
+                extent,
+                byte_len: bytes.len(),
+                readback: Some((&readback, pitch)),
+            },
         );
         frame.target = Some(target);
         frame.readback = Some(readback);
@@ -748,7 +847,8 @@ impl<A: hal::Api> State<A> {
             }
         }
         self.recycle(index);
-        self.last_stats = batch_stats(bytes, self.frames[index].capacity);
+        self.last_stats = batch_stats(batch, self.frames[index].capacity);
+        self.mark_images_used(batch, value);
         Ok(Capture {
             width,
             height,
@@ -759,6 +859,9 @@ impl<A: hal::Api> State<A> {
     fn release(&mut self) {
         for index in 0..self.frames.len() {
             self.recycle(index);
+        }
+        for image in self.images.drain().chain(self.retired.drain(..)) {
+            images::destroy_image::<A>(&self.device, image);
         }
         // SAFETY: caller proved queue idle, so nothing references any resource.
         // Commands/views are recycled first, then buffers and encoders, then
@@ -779,6 +882,12 @@ impl<A: hal::Api> State<A> {
             if let Some(layout) = self.layout.take() {
                 self.device.destroy_pipeline_layout(layout);
             }
+            if let Some(layout) = self.image_layout.take() {
+                self.device.destroy_bind_group_layout(layout);
+            }
+            if let Some(sampler) = self.sampler.take() {
+                self.device.destroy_sampler(sampler);
+            }
             if let Some(shader) = self.shader.take() {
                 self.device.destroy_shader_module(shader);
             }
@@ -793,23 +902,63 @@ impl<A: hal::Api> State<A> {
     }
 }
 
-fn batch_stats(bytes: &[u8], capacity: u64) -> FrameStats {
+fn batch_stats(batch: &Batch, capacity: u64) -> FrameStats {
+    let bytes = &batch.bytes;
     FrameStats {
         quads: bytes.len() / VERTEX_BYTES,
-        draw_calls: u32::from(!bytes.is_empty()),
+        draw_calls: batch.draws.len() as u32,
         uploaded_bytes: bytes.len() as u64,
         vertex_capacity: capacity,
     }
 }
 
+struct BoundDraw<'a, A: hal::Api> {
+    group: &'a A::BindGroup,
+    first: u32,
+    count: u32,
+}
+fn bind_draws<'a, A: hal::Api>(
+    images: &'a ResourceArena<ImageResource, TextureResource<A>>,
+    white: ImageId,
+    batch: &Batch,
+) -> Vec<BoundDraw<'a, A>> {
+    batch
+        .draws
+        .iter()
+        .map(|draw| BoundDraw {
+            group: images
+                .get(&draw.image.unwrap_or(white))
+                .expect("validated image")
+                .group
+                .as_ref()
+                .expect("initialized image"),
+            first: draw.first,
+            count: draw.count,
+        })
+        .collect()
+}
+struct Pass<'a, A: hal::Api> {
+    pipeline: &'a A::RenderPipeline,
+    layout: &'a A::PipelineLayout,
+    draws: &'a [BoundDraw<'a, A>],
+    extent: wgt::Extent3d,
+    byte_len: usize,
+    readback: Option<(&'a A::Buffer, u32)>,
+}
+
 fn encode<A: hal::Api>(
     frame: &mut Frame<A>,
     target: &A::Texture,
-    pipeline: &A::RenderPipeline,
-    extent: wgt::Extent3d,
-    byte_len: usize,
-    readback: Option<(&A::Buffer, u32)>,
+    pass: Pass<'_, A>,
 ) -> Result<(), RenderError> {
+    let Pass {
+        pipeline,
+        layout,
+        draws,
+        extent,
+        byte_len,
+        readback,
+    } = pass;
     let encoder = frame.encoder.as_mut().unwrap();
     // SAFETY: encoder is closed and all old commands were reclaimed after fence
     // completion. Every barrier matches our tracked per-slot resource usage.
@@ -817,7 +966,8 @@ fn encode<A: hal::Api>(
         .map_err(|e| error("begin encoding", e))?;
     // SAFETY: checked buffer sizes/offsets, COPY_SRC/COPY_DST usage, aligned
     // copies. Render pass uses a live matching view, one sample and no depth.
-    // The complete batch fits the binding. No bindings or indices exist.
+    // The complete vertex batch fits its binding. Texture groups match the
+    // pipeline layout and refer to owned images in RESOURCE state; no indices.
     let result = unsafe {
         if byte_len != 0 {
             encoder.transition_buffers(
@@ -924,7 +1074,10 @@ fn encode<A: hal::Api>(
                             NonZeroU64::new(byte_len as u64),
                         ),
                     );
-                    encoder.draw(0, (byte_len / 24) as u32, 0, 1);
+                    for draw in draws {
+                        encoder.set_bind_group(layout, 0, draw.group, &[]);
+                        encoder.draw(draw.first, draw.count, 0, 1);
+                    }
                 }
                 encoder.end_render_pass();
                 encoder.transition_textures(std::iter::once(hal::TextureBarrier {

@@ -9,7 +9,7 @@ The scene provides scoped widget identities,
 validation of scene/subtree declarations before mutation, persistent ECS nodes
 and interaction flags, plus typed coordinate spaces and DPI conversion.
 The separate GPU slice opens a window and renders ordered, clipped quad batches. Scene widgets
-are not yet connected to rendering; layout, text and texture sampling are still
+are not yet connected to rendering; layout and text are still
 planned. See [plan.md](plan.md) for the full roadmap and acceptance criteria.
 
 ## Run
@@ -35,7 +35,7 @@ Apple targets. The default `zest` facade stays headless; enable its `gpu` featur
 to use `zest::gpu::{Renderer, Quad}`. HAL, Naga and wgpu-types are pinned together
 at 30.0.1; the high-level `wgpu` crate is not used.
 
-The demo renders overlapping quads with nested rectangular clips and changes the
+The demo renders overlapping quads and a checker texture with rectangular clips and changes the
 left quad's color on hover. Resize and DPI events update surface/geometry. Normal
 operation uses an event-driven `Wait` loop, without continuous redraw requests.
 Close the window or press Esc to exit. Linux needs a Vulkan driver/loader and
@@ -51,12 +51,13 @@ for rendering and presentation before releasing resources. Zero-size surfaces
 remain unconfigured and submit no work. The renderer stays on its creation
 thread, owns the window through `Arc`, and exposes no native GPU handles.
 
-`Renderer::render_list` expands the list to ordered triangles and issues one draw
-for the compatible solid-color batch. Each frame slot grows its buffers to a
+`Renderer::render_list` expands the list to ordered triangles and merges adjacent
+commands using the same texture. Solid-only lists use one draw; interleaved
+quad/image/quad commands retain their order and use three draws. Each frame slot grows its buffers to a
 power-of-two capacity (bounded by adapter limits), retaining capacity for reuse.
 Growth waits for that slot's fence and resets resource usage tracking. Empty
 lists clear the target without allocating/uploading vertices or issuing a draw.
-`last_frame_stats()` reports quads, encoded draw calls, uploaded bytes and the
+`last_frame_stats()` reports rectangle primitives (including images), encoded draw calls, uploaded vertex bytes and the
 selected slot's vertex capacity; these are CPU counters, not GPU timestamps.
 
 `--smoke` presents 20 frames, requests a window resize, tests zero-size
@@ -65,7 +66,9 @@ pixel samples check fractional DPI, bounds/orientation, padded row copies, sRGB
 encoding and opaque/premultiplied-alpha blending (two byte tolerance). Additional
 checks render 129 quads in one draw, test nested clips and reversed painter order,
 grow/reuse buffers, and check every pixel in a clear-only capture. The first two
-onscreen frames test empty slots before their first buffer allocation. To save
+onscreen frames test empty slots before their first vertex buffer allocation.
+Image checks cover padded RGBA upload, UV crop/orientation, clipping, tint/alpha,
+material order, adjacent batching, stale/foreign handles and fence retirement. To save
 the demo display list rendered offscreen as PPM:
 
 ```sh
@@ -80,19 +83,19 @@ when presentation succeeds. Validation messages depend on installed platform
 validation layers; passing smoke does not prove device-loss recovery or complete
 HAL correctness.
 
-All unsafe operations are confined to `zest-gpu/src/backend.rs`, with documented
+All unsafe operations are confined to `zest-gpu`'s backend module tree, with documented
 invariants and Clippy checks for safety comments. Core, facade and demos retain
 their unsafe-code prohibition. If GPU completion cannot be established during
 shutdown, the owner retains native resources until process exit rather than
 free storage that might still be in use. Terminal HAL failures require recreating
-the renderer. General resource handles, an upload ring, texture sampling, backend
+the renderer. An upload ring, texture atlases, backend
 fallback and device recovery remain future work; this is an initial HAL slice.
 
 ## Display lists and rectangular clipping
 
 `zest::paint` is available without the GPU feature. `DisplayList` is an immutable
-paint snapshot; `Painter` validates bounds/colors, preserves declaration order,
-intersects nested clips and omits fully clipped or transparent quads:
+paint snapshot; `Painter` validates geometry/colors/UVs, preserves declaration order,
+intersects nested clips and omits fully clipped or transparent primitives:
 
 ```rust
 use zest::{geometry::Rect, paint::{DisplayList, Quad}};
@@ -118,9 +121,41 @@ Nonfinite clips are errors; empty/negative clip extents hide their child scope.
 Invalid quad input is rejected even when clipped out. A returned clip-scope error
 rolls back its commands, and a failed list builder exposes no partial snapshot.
 Child painters preserve the parent's clip without a mutable global clip stack.
-Clipping currently trims axis-aligned solid rectangles on the CPU; rounded clips,
-transforms, text, textures and automatic extraction from the ECS scene remain
+Clipping trims axis-aligned rectangles and adjusts image UVs on the CPU; rounded clips,
+transforms, text and automatic extraction from the ECS scene remain
 future work.
+
+## Image resources
+
+With the `gpu` feature, `Renderer::upload_rgba8(width, height, bytes)` accepts
+top-to-bottom straight-alpha sRGB RGBA8 data and returns an `ImageId`. Use
+`Painter::image(Image::new(id, bounds))` to include it in a display list.
+`Image::uv` is a normalized rectangle within [0, 1]; `tint` is straight-alpha
+linear RGBA. Sampling currently uses nearest/clamp-to-edge with one mip level.
+The shader decodes sRGB through the texture format and premultiplies after
+sampling. Bilinear filtering, image-file decoding, atlases and async loading
+are not implemented yet.
+
+Upload row pitch is aligned to the adapter requirement; padding is initialized,
+noncoherent memory is flushed, and texture usage transitions from UNINITIALIZED
+through COPY_DST to RESOURCE. Staging buffers and command buffers remain in a
+frame slot until its fence completes. Uploads and rendering share a queue/fence,
+so a draw observes earlier uploads without a whole-device idle wait per image.
+
+`remove_image(id)` invalidates the handle immediately and queues native resources
+for retirement after their last upload/draw submission completes. Later rendering,
+captures and uploads collect completed entries; `wait_idle()` drains retirement
+after waiting, and shutdown releases all owned resources. `image_stats()` counts
+live user images and retired entries, excluding the internal white texture.
+Stale handles, handles from another arena/renderer, and wrong resource kinds
+cannot alias an image after slot reuse. Display lists with stale/foreign handles
+fail before GPU submission and do not make the renderer terminal. Recreating a
+renderer requires reuploading images; old IDs belong to its old resource arena.
+
+The underlying `zest::resource::{ResourceArena, ResourceId}` is also available in
+headless builds. It provides typed, arena-local generational identities; its
+owner controls actual destruction. Resource marker types prevent mixing kinds
+at compile time; exhausted generations retire slots instead of wrapping.
 
 ## Scene updates
 

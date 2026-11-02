@@ -20,7 +20,7 @@ wgpu-hal = { version = "=30.0.1", features = ["vulkan"] }
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu-hal = { version = "=30.0.1", features = ["metal"] }
 
-# HAL calls are confined to backend.rs. All other modules deny unsafe code.
+# HAL calls are confined to the backend module tree; other modules deny unsafe.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

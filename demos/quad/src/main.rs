@@ -13,7 +13,7 @@ use winit::{
 use zest::{
     geometry::{Logical, Point, Rect, ScaleFactor},
     gpu::{Capture, Quad, RenderStatus, Renderer},
-    paint::{DisplayList, PaintError},
+    paint::{DisplayList, Image, ImageId, PaintError},
 };
 
 static LOG_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -47,6 +47,7 @@ const BOUNDS: Rect<Logical> = Rect::from_xywh(48.0, 48.0, 240.0, 140.0);
 
 struct App {
     renderer: Option<Renderer>,
+    demo_image: Option<ImageId>,
     window: Option<Arc<Window>>,
     smoke: bool,
     frames: usize,
@@ -86,12 +87,14 @@ impl App {
         let list = if clear_only {
             DisplayList::default()
         } else {
-            demo_list(self.hovered)?
+            demo_list(self.hovered, self.demo_image.unwrap())?
         };
         match renderer.render_list(&list, scale)? {
             RenderStatus::Presented => {
                 let stats = renderer.last_frame_stats();
-                if stats.draw_calls != u32::from(!list.is_empty()) || stats.quads != list.len() {
+                if stats.draw_calls != if list.is_empty() { 0 } else { 2 }
+                    || stats.quads != list.len()
+                {
                     return Err("batch draw counters disagree with the display list".into());
                 }
                 if clear_only && (stats.uploaded_bytes != 0 || stats.vertex_capacity != 0) {
@@ -124,6 +127,7 @@ impl App {
                 renderer.wait_idle()?;
                 check_pixels(renderer)?;
                 check_batch_pixels(renderer)?;
+                image_checks::check(renderer)?;
                 if let Some(path) = &self.capture_path {
                     let size = window.inner_size();
                     let capture = renderer.capture_list(&list, scale, size.width, size.height)?;
@@ -146,7 +150,7 @@ impl App {
     }
 }
 
-fn demo_list(hovered: bool) -> Result<DisplayList, PaintError> {
+fn demo_list(hovered: bool, image: ImageId) -> Result<DisplayList, PaintError> {
     DisplayList::build(|p| {
         p.quad(Quad {
             bounds: BOUNDS,
@@ -179,6 +183,9 @@ fn demo_list(hovered: bool) -> Result<DisplayList, PaintError> {
         p.quad(Quad {
             bounds: Rect::from_xywh(192.0, 124.0, 160.0, 108.0),
             color: [0.05, 0.25, 0.9, 0.65],
+        })?;
+        p.with_clip(Rect::from_xywh(80.0, 248.0, 164.0, 80.0), |p| {
+            p.image(Image::new(image, Rect::from_xywh(64.0, 240.0, 200.0, 96.0)))
         })
     })
 }
@@ -225,7 +232,7 @@ fn check_batch_pixels(renderer: &mut Renderer) -> Result<(), Box<dyn std::error:
     let grown = renderer.last_frame_stats();
     if grown.quads != 129
         || grown.draw_calls != 1
-        || grown.uploaded_bytes != 129 * 144
+        || grown.uploaded_bytes != 129 * 192
         || grown.vertex_capacity < grown.uploaded_bytes
     {
         return Err("batch growth or draw counters are incorrect".into());
@@ -345,7 +352,19 @@ impl ApplicationHandler for App {
                 )?,
             );
             let size = window.inner_size();
-            let renderer = Renderer::new(window.clone(), size.width, size.height)?;
+            let mut renderer = Renderer::new(window.clone(), size.width, size.height)?;
+            let pixels: Vec<_> = (0..16)
+                .flat_map(|y| {
+                    (0..16).flat_map(move |x| {
+                        if (x / 4 + y / 4) % 2 == 0 {
+                            [255, 160, 32, 255]
+                        } else {
+                            [32, 160, 255, 255]
+                        }
+                    })
+                })
+                .collect();
+            self.demo_image = Some(renderer.upload_rgba8(16, 16, &pixels)?);
             println!("Adapter: {}", renderer.adapter_name());
             println!(
                 "Hover the quad; resize the window; Esc closes. Rendering sleeps between events."
@@ -362,6 +381,7 @@ impl ApplicationHandler for App {
 
     fn suspended(&mut self, _events: &ActiveEventLoop) {
         self.renderer = None;
+        self.demo_image = None;
         self.window = None;
     }
 
@@ -466,6 +486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let events = EventLoop::new()?;
     let mut app = App {
         renderer: None,
+        demo_image: None,
         window: None,
         smoke,
         frames: 0,
@@ -501,3 +522,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+mod image_checks;

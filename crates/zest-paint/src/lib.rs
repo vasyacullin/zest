@@ -1,7 +1,62 @@
-//! Backend-independent paint snapshots. Quads stay in painter order; nested
-//! axis-aligned clips intersect on the CPU in logical window coordinates.
+//! Backend-independent paint snapshots. Quads/images stay in painter order;
+//! nested clips intersect on the CPU, adjusting image UVs with their bounds.
 use std::fmt;
 use zest_core::geometry::{Logical, Rect};
+use zest_core::resource::ResourceId;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImageResource {}
+pub type ImageId = ResourceId<ImageResource>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Uv {}
+
+/// Normalized UVs address straight-alpha sRGB pixels. Tint is linear RGBA.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Image {
+    pub id: ImageId,
+    pub bounds: Rect<Logical>,
+    pub uv: Rect<Uv>,
+    pub tint: [f32; 4],
+}
+impl Image {
+    pub fn new(id: ImageId, bounds: Rect<Logical>) -> Self {
+        Self {
+            id,
+            bounds,
+            uv: Rect::from_xywh(0.0, 0.0, 1.0, 1.0),
+            tint: [1.0; 4],
+        }
+    }
+    pub fn validate(&self) -> Result<(), PaintError> {
+        Quad {
+            bounds: self.bounds,
+            color: self.tint,
+        }
+        .validate()?;
+        if self.uv.is_empty()
+            || self.uv.origin.x < 0.0
+            || self.uv.origin.y < 0.0
+            || self.uv.origin.x + self.uv.size.width > 1.0
+            || self.uv.origin.y + self.uv.size.height > 1.0
+        {
+            return Err(PaintError::InvalidUv);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Primitive {
+    Quad(Quad),
+    Image(Image),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    Quad(usize),
+    Image(usize),
+}
 
 /// Straight-alpha linear RGBA in [0, 1]. The renderer premultiplies on upload.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +86,7 @@ pub enum PaintError {
     InvalidBounds,
     InvalidColor,
     InvalidClip,
+    InvalidUv,
 }
 impl fmt::Display for PaintError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -38,6 +94,7 @@ impl fmt::Display for PaintError {
             Self::InvalidBounds => "quad bounds must be finite and nonempty",
             Self::InvalidColor => "RGBA channels must be finite and in [0, 1]",
             Self::InvalidClip => "clip coordinates and edges must be finite",
+            Self::InvalidUv => "UV bounds must be finite, nonempty and within [0, 1]",
         })
     }
 }
@@ -56,8 +113,8 @@ fn finite_rect(rect: Rect<Logical>) -> bool {
     .all(|n| n.is_finite())
 }
 
-/// An immutable, validated sequence of clipped solid-color quads. It contains
-/// neither ECS entities nor GPU handles and may be built without a GPU backend.
+/// An immutable, validated sequence of clipped quads and images. Contains opaque
+/// image identities, no native GPU handles/ECS entities; buildable without a GPU.
 ///
 /// ```
 /// use zest_paint::{DisplayList, Quad};
@@ -73,6 +130,8 @@ fn finite_rect(rect: Rect<Logical>) -> bool {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DisplayList {
     quads: Vec<Quad>,
+    images: Vec<Image>,
+    order: Vec<Command>,
 }
 
 impl DisplayList {
@@ -82,7 +141,7 @@ impl DisplayList {
     ) -> Result<Self, PaintError> {
         let mut list = Self::default();
         build(&mut Painter {
-            quads: &mut list.quads,
+            list: &mut list,
             clip: Clip::Unbounded,
         })?;
         Ok(list)
@@ -91,10 +150,19 @@ impl DisplayList {
         &self.quads
     }
     pub fn len(&self) -> usize {
-        self.quads.len()
+        self.order.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.quads.is_empty()
+        self.order.is_empty()
+    }
+    /// All primitives in painter order. `quads()` is the solid-only subset.
+    pub fn primitives(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Primitive> + DoubleEndedIterator + '_ {
+        self.order.iter().map(|command| match *command {
+            Command::Quad(i) => Primitive::Quad(self.quads[i]),
+            Command::Image(i) => Primitive::Image(self.images[i]),
+        })
     }
 }
 
@@ -108,7 +176,7 @@ enum Clip {
 /// Builder for one snapshot. Clip scopes borrow a child painter, so the parent's
 /// clip is restored even if application code catches a panic in a child scope.
 pub struct Painter<'a> {
-    quads: &'a mut Vec<Quad>,
+    list: &'a mut DisplayList,
     clip: Clip,
 }
 impl Painter<'_> {
@@ -127,7 +195,37 @@ impl Painter<'_> {
             },
             Clip::Unbounded => {}
         }
-        self.quads.push(quad);
+        self.list.order.push(Command::Quad(self.list.quads.len()));
+        self.list.quads.push(quad);
+        Ok(())
+    }
+
+    pub fn image(&mut self, mut image: Image) -> Result<(), PaintError> {
+        image.validate()?;
+        if image.tint[3] == 0.0 {
+            return Ok(());
+        }
+        let bounds = match self.clip {
+            Clip::Empty => return Ok(()),
+            Clip::Unbounded => image.bounds,
+            Clip::Bounds(clip) => match image.bounds.intersection(&clip) {
+                Some(bounds) => bounds,
+                None => return Ok(()),
+            },
+        };
+        let original = image.bounds;
+        image.uv = Rect::from_xywh(
+            image.uv.origin.x
+                + (bounds.origin.x - original.origin.x) / original.size.width * image.uv.size.width,
+            image.uv.origin.y
+                + (bounds.origin.y - original.origin.y) / original.size.height
+                    * image.uv.size.height,
+            bounds.size.width / original.size.width * image.uv.size.width,
+            bounds.size.height / original.size.height * image.uv.size.height,
+        );
+        image.bounds = bounds;
+        self.list.order.push(Command::Image(self.list.images.len()));
+        self.list.images.push(image);
         Ok(())
     }
 
@@ -153,13 +251,19 @@ impl Painter<'_> {
                     .map_or(Clip::Empty, Clip::Bounds),
             }
         };
-        let start = self.quads.len();
+        let start = (
+            self.list.quads.len(),
+            self.list.images.len(),
+            self.list.order.len(),
+        );
         let result = build(&mut Painter {
-            quads: self.quads,
+            list: self.list,
             clip,
         });
         if result.is_err() {
-            self.quads.truncate(start);
+            self.list.quads.truncate(start.0);
+            self.list.images.truncate(start.1);
+            self.list.order.truncate(start.2);
         }
         result
     }
@@ -168,6 +272,60 @@ impl Painter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn image() -> Image {
+        let mut ids = zest_core::resource::ResourceArena::<ImageResource, _>::default();
+        Image::new(ids.insert(()), Rect::from_xywh(0.0, 0.0, 100.0, 80.0))
+    }
+    #[test]
+    fn image_clipping_preserves_uv_mapping_and_mixed_order() {
+        let source = image();
+        let list = DisplayList::build(|p| {
+            p.quad(quad(0.0))?;
+            p.with_clip(Rect::from_xywh(25.0, 20.0, 50.0, 40.0), |p| p.image(source))?;
+            p.quad(quad(10.0))
+        })
+        .unwrap();
+        let commands: Vec<_> = list.primitives().collect();
+        assert!(matches!(commands[0], Primitive::Quad(_)));
+        let Primitive::Image(clipped) = commands[1] else {
+            panic!("image order")
+        };
+        assert_eq!(clipped.bounds, Rect::from_xywh(25.0, 20.0, 50.0, 40.0));
+        assert_eq!(clipped.uv, Rect::from_xywh(0.25, 0.25, 0.5, 0.5));
+        assert!(matches!(commands[2], Primitive::Quad(_)));
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.quads().len(), 2);
+    }
+    #[test]
+    fn invalid_uv_and_failed_image_scope_do_not_escape() {
+        let source = image();
+        assert_eq!(
+            DisplayList::build(|p| p.image(Image {
+                uv: Rect::from_xywh(0.0, 0.0, 2.0, 1.0),
+                ..source
+            })),
+            Err(PaintError::InvalidUv)
+        );
+        assert_eq!(
+            DisplayList::build(|p| p.image(Image {
+                uv: Rect::from_xywh(f64::NAN, 0.0, 1.0, 1.0),
+                ..source
+            })),
+            Err(PaintError::InvalidUv)
+        );
+        let list = DisplayList::build(|p| {
+            let result = p.with_clip(source.bounds, |p| {
+                p.image(source)?;
+                p.quad(quad(0.0))?;
+                Err::<(), _>(PaintError::InvalidUv)
+            });
+            assert_eq!(result, Err(PaintError::InvalidUv));
+            p.image(source)
+        })
+        .unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list.quads().is_empty());
+    }
     fn quad(x: f64) -> Quad {
         Quad {
             bounds: Rect::from_xywh(x, 0.0, 20.0, 20.0),
