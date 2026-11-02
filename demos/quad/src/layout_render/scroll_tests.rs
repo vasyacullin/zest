@@ -132,7 +132,7 @@ fn resize_and_partial_removal_clamp_scroll_and_disabling_clipping_resets_the_off
 }
 
 #[test]
-fn modal_wheel_routing_stays_on_eligible_content_and_ignores_blocked_padding() {
+fn modal_wheel_routing_stops_at_its_root_and_ignores_blocked_padding() {
     let mut demo = demo();
     let body = demo.labels[1].id.clone();
     demo.key(&Key::Named(NamedKey::F3), true, false);
@@ -140,8 +140,24 @@ fn modal_wheel_routing_stays_on_eligible_content_and_ignores_blocked_padding() {
     assert!(!wheel(&mut demo, MouseScrollDelta::LineDelta(0.0, -1.0))); // Pointer on blocked title.
     demo.pointer_moved(Point::new(34.0, 90.0));
     assert_eq!(demo.hit(Point::new(34.0, 90.0)), Some(body));
-    assert!(wheel(&mut demo, MouseScrollDelta::LineDelta(0.0, -1.0)));
+    let before = demo.snapshot.as_ref().unwrap().clone();
+    assert!(!wheel(&mut demo, MouseScrollDelta::LineDelta(0.0, -1.0)));
+    assert!(before.same_snapshot(demo.snapshot.as_ref().unwrap()));
     assert!(demo.modal_active());
     demo.pointer_moved(Point::new(10.0, 10.0));
     assert!(!wheel(&mut demo, MouseScrollDelta::LineDelta(0.0, -1.0)));
+}
+
+#[test]
+fn wheel_over_column_padding_or_scrollbar_routes_to_the_container_without_a_button_hit() {
+    let mut demo = demo();
+    demo.pointer_moved(Point::new(10.0, 10.0));
+    assert!(demo.hit(Point::new(10.0, 10.0)).is_none());
+    assert!(wheel(&mut demo, MouseScrollDelta::LineDelta(0.0, -1.0)));
+    let bar = demo.scrollbar().unwrap();
+    let point = Point::new(bar.track().origin.x + 4.0, bar.track().origin.y + 1.0);
+    demo.pointer_moved(point);
+    assert!(demo.hit(point).is_none());
+    assert!(wheel(&mut demo, MouseScrollDelta::LineDelta(0.0, 1.0)));
+    assert_eq!(demo.scroll_offset.y, 0.0);
 }

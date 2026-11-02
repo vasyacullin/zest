@@ -163,6 +163,24 @@ unreachable targets return None. Planning does not mutate the scene/snapshot,
 run Taffy or measure text. Use fresh snapshots and check scene eligibility;
 plans carry no entity-generation or input/modal authorization.
 
+`LayoutSnapshot::scroll_plan(target, delta, boundary)` routes a signed logical
+offset delta through a target and its clipping ancestors. Positive components
+increase offsets; negate normalized wheel content movement before calling it.
+Each scrollport consumes only the available movement, passing the remainder
+outward independently on each axis. `ScrollPlan::adjustments` contains absolute
+`ScrollAdjustment` offsets, inner-first; apply them to styles and sync/compute.
+`remaining` holds movement unused by the chain. Nonclipping nodes pass it through;
+starting at a container includes that container, and sibling branches are skipped.
+
+The optional boundary is an inclusive ancestor/target where routing stops, such
+as the active modal root. Unknown/unrelated boundaries and nonfinite deltas reject
+the plan without mutation. Zero requests and exhausted chains return an empty
+adjustment list. Planning uses a fresh immutable snapshot, does no layout/text
+measurement, and carries no scene eligibility or entity-generation checks.
+Choose the start with current hit testing and scene permissions before applying
+it. Applications may discard remaining movement or forward it to another owner.
+Discard the remainder when the boundary is intended to contain input, such as a modal.
+
 `ScrollbarGeometry::new(track, Axis::{Row, Column}, viewport_extent, metrics,
 min_thumb)` provides shared logical track/thumb geometry for custom painting and
 input. Row is horizontal; Column is vertical. It hides empty/invalid tracks and
@@ -235,8 +253,11 @@ While F4 clipping is enabled, the wheel scrolls the column under the pointer.
 Line deltas use 36 logical pixels; touchpad pixels are divided by window DPI.
 Shift redirects vertical-only deltas horizontally; unsupported modifiers and
 nonfinite deltas are ignored. Positions clamp at the ends; boundary no-ops reuse
-the snapshot. Modal scopes accept wheel input only over eligible content, and a
-disabled/unfocused column rejects it. Scrolling re-hits a stationary pointer and
+the snapshot. Wheel routing uses `scroll_plan` from the topmost input-eligible
+box, including container padding or the scrollbar track. Modal scopes stop the
+chain at their root, so a non-scrollable leaf modal cannot scroll an outside owner.
+A disabled/unfocused column rejects it. Zero/nonfinite deltas are ignored without
+cancelling an active scrollbar drag. Scrolling re-hits a stationary pointer and
 cancels gestures; fully hidden focus is cleared. Resizing reclamps the position;
 turning F4 off resets it. Text paragraphs and GPU images stay reusable.
 The clipped column also paints a vertical scrollbar in its right padding. Drag

@@ -22,6 +22,15 @@ fn start(demo: &mut LayoutDemo) -> Point<Logical> {
     demo.pointer_moved(point);
     assert!(demo.pointer_press());
     assert!(demo.scrollbar_dragging());
+    assert!(
+        !demo
+            .wheel(
+                MouseScrollDelta::LineDelta(0.0, 0.0),
+                ScaleFactor::new(1.25).unwrap()
+            )
+            .unwrap()
+    );
+    assert!(demo.scrollbar_dragging());
     point
 }
 

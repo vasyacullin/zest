@@ -11,6 +11,7 @@ mod clip_checks;
 mod focus_checks;
 mod interaction_checks;
 mod modal_checks;
+mod scroll_chain_checks;
 mod scroll_checks;
 mod scrollbar_checks;
 mod scrollbar_input;
@@ -432,7 +433,6 @@ impl LayoutDemo {
                 .scene
                 .state(&self.root)
                 .is_none_or(|state| !state.enabled())
-            || (self.modal_active() && self.hit(pointer).is_none())
         {
             return Ok(false);
         }
@@ -444,22 +444,32 @@ impl LayoutDemo {
                 (point.x / scale.get(), point.y / scale.get())
             }
         };
-        if !x.is_finite() || !y.is_finite() {
+        if !x.is_finite() || !y.is_finite() || (x == 0.0 && y == 0.0) {
             return Ok(false);
         }
         if self.modifiers.shift_key() && x == 0.0 {
             x = y;
             y = 0.0;
         }
-        let metrics = snapshot.scroll(&self.root).unwrap();
-        let next = Point::new(
-            (metrics.offset.x - x.clamp(-metrics.max_offset.x, metrics.max_offset.x))
-                .clamp(0.0, metrics.max_offset.x),
-            (metrics.offset.y - y.clamp(-metrics.max_offset.y, metrics.max_offset.y))
-                .clamp(0.0, metrics.max_offset.y),
-        );
+        let Some(target) = snapshot.hit_test(pointer, |id| self.scene.input_allowed(id)) else {
+            return Ok(false);
+        };
+        let Some(plan) = snapshot.scroll_plan(target, Point::new(-x, -y), self.scene.modal_root())
+        else {
+            return Ok(false);
+        };
+        // The preview owns one scrollport; the general plan can update multiple
+        // ancestor styles in applications with nested scrollable containers.
+        let next = plan
+            .adjustments
+            .iter()
+            .find(|change| change.widget == self.root)
+            .map(|change| change.offset);
         let cancelled = self.clear_scrollbar_drag();
-        let changed = self.scroll_to(next, false)?;
+        let changed = match next {
+            Some(offset) => self.scroll_to(offset, false)?,
+            None => false,
+        };
         if cancelled {
             self.refresh_input();
         }
@@ -876,6 +886,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     scroll_checks::check(&mut demo, renderer)?;
     focus_checks::check(&mut demo, renderer)?;
     scrollbar_checks::check(&mut demo, renderer)?;
+    scroll_chain_checks::check(renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;

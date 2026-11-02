@@ -23,12 +23,14 @@
 mod hit_test;
 mod reveal;
 mod scroll;
+mod scroll_chain;
 mod scrollbar;
 mod style;
 #[cfg(feature = "text")]
 mod text;
 pub use reveal::{RevealPlan, ScrollAdjustment};
 pub use scroll::ScrollMetrics;
+pub use scroll_chain::ScrollPlan;
 pub use scrollbar::{ScrollbarGeometry, ScrollbarPart};
 use std::{
     collections::{HashMap, HashSet},
