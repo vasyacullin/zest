@@ -7,7 +7,7 @@ through `wgpu-hal`, targeting desktop and mobile applications and tools.
 **Current implementation includes a headless scene, optional Flexbox layout and an experimental HAL quad demo.**
 The scene provides scoped widget identities,
 validation of scene/subtree declarations before mutation, persistent ECS nodes
-and interaction flags, plus typed coordinate spaces and DPI conversion.
+and interaction flags, synchronous typed event routing, plus typed coordinate spaces and DPI conversion.
 The separate GPU slice opens a window and renders ordered, clipped quad batches.
 An optional text model provides Unicode editing, transient IME composition and
 bounded undo/redo. Optional paragraph layout/rasterization renders Latin,
@@ -34,7 +34,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
 The demo reorders keyed buttons, then partially updates their container while
-retaining a button's focus/hover and a status sibling. Explicit keys are required
+retaining a button's focus/hover and a status sibling, then routes an event to the
+focused button through its container. Explicit keys are required
 in this initial API; automatic call-site keys are planned.
 
 ## Retained Flexbox layout
@@ -90,7 +91,7 @@ measurement calls, rather than total node visits.
 The headless `zest-layout-demo` checks reorder identity, focus/hover, fractional
 bounds, snapshot/cache reuse and explicit conversion of layout bounds into quads.
 The CI workflow includes this demo. Grid, wrapping flex rows, absolute/manual layout,
-automatic scene paint extraction and general widget event routing remain future
+automatic scene paint extraction and a complete widget/platform event binding remain future
 work; this is the first layout slice, not a complete widget system.
 
 `LayoutSnapshot::hit_test(point, |id| accepts(id))` finds the last accepted box in
@@ -279,6 +280,10 @@ DPI, occlusion and Tab changes cancel a pending gesture without activating it.
 Keyed reorder retains focus/selection; removal clears them. These changes update
 scene flags and paint without invalidating layout, paragraphs or text images.
 Repeated movement within one target requests no redraw.
+F6 lets the column intercept child activations and marks its top edge orange.
+Clicks and Enter/Space still show press/focus feedback, but their selection action
+is prevented. F6 restores normal activation. An F3 modal scope excludes the outer
+column from its event route, so activation inside that scope still works.
 Text/IME editing remains in the default demo. Esc closes the layout window when
 neither a modal scope nor a scrollbar drag is active.
 The raster bitmap budgets still apply. Layout smoke uses controlled input replay
@@ -297,6 +302,32 @@ changes, and `reset` when the window loses input ownership. Cancellation retains
 held-input latches until release; reset forgets them. Reset with the owning scene
 before dropping/switching controllers. Capture is logical: the window backend
 must deliver releases outside its bounds; the controller does not grab the cursor.
+
+`zest::event` adds typed, synchronous routing with no window, layout or GPU dependency.
+`Scene::dispatch_event(target, &mut payload, handler)` delivers `EventContext` and
+the mutable payload to the handler at each node: capture from the outermost
+ancestor to the parent, target once, then bubble from parent to outermost ancestor.
+`dispatch_focused_event` chooses the current focused node. Identity-only `push_id`
+scopes are skipped. The active modal root is an inclusive boundary; handlers outside
+it are not called. Unknown, disabled or modal-blocked targets return `None` without
+calling handlers or changing the payload.
+
+Return `EventControl::Continue`, `StopPropagation`, `PreventDefault` or `Consume`
+(stop and prevent). Stopping propagation alone leaves the default action allowed,
+even if capture stopped before target delivery. Prevention persists through later
+handlers; `EventContext::default_prevented` reports earlier prevention.
+`DispatchResult` reports visits, target delivery, propagation stopping and default
+prevention. Apply the application/widget default only for `Some(result)` with
+`!result.default_prevented`. The layout preview uses this path for both pointer
+and keyboard selection actions.
+
+Handlers may mutate application state and the typed payload while borrowing the
+scene immutably. Record reconciliation/focus changes as intents and apply them
+after dispatch. Nested dispatches have independent propagation/default state.
+Each dispatch reads the current hierarchy; a recreated key addresses its new node.
+Validate queued/stale input separately: `ActivationState` checks gesture generations,
+and positional targeting requires current geometry. Routing itself does not store
+listeners or automatically activate, focus, capture input or invalidate paint.
 
 `Scene::set_enabled(id, enabled)` changes a retained local setting. Its effective
 value, `WidgetState::enabled()`, includes disabled ancestors; an enabled child

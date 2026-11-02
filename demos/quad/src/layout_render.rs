@@ -2,12 +2,14 @@
 use super::*;
 use zest::{
     FocusDirection, Scene, WidgetId,
+    event::{EventControl, EventPhase},
     geometry::Size,
     input::{ActivationKey, ActivationState, InputResult},
     layout::{Edges, LayoutSnapshot, LayoutTree, Length, RevealPlan, Style, TextContent},
     text::raster::{Paragraph, Rasterizer, ShapeOptions},
 };
 mod clip_checks;
+mod event_checks;
 mod focus_checks;
 mod interaction_checks;
 mod modal_checks;
@@ -45,6 +47,7 @@ pub(super) struct LayoutDemo {
     activation: ActivationState,
     selected: Option<WidgetId>,
     clipped: bool,
+    intercept_activation: bool,
     scroll_offset: Point<Logical>,
     scrollbar_drag: Option<scrollbar_input::Drag>,
     window_focused: bool,
@@ -95,6 +98,7 @@ impl LayoutDemo {
             activation: ActivationState::default(),
             selected: None,
             clipped: false,
+            intercept_activation: false,
             scroll_offset: Point::new(0.0, 0.0),
             scrollbar_drag: None,
             window_focused: true,
@@ -535,14 +539,31 @@ impl LayoutDemo {
         self.apply_input(result)
     }
     fn apply_input(&mut self, result: InputResult) -> bool {
+        let mut changed = result.changed;
         if let Some(action) = result.activated {
-            self.selected = if self.selected.as_ref() == Some(&action.widget) {
-                None
-            } else {
-                Some(action.widget)
-            };
+            let mut source = action.source;
+            let dispatch = self
+                .scene
+                .dispatch_event(&action.widget, &mut source, |ctx, _| {
+                    if self.intercept_activation
+                        && ctx.current_target == &self.root
+                        && ctx.phase == EventPhase::Capture
+                    {
+                        EventControl::Consume
+                    } else {
+                        EventControl::Continue
+                    }
+                });
+            if dispatch.is_some_and(|result| !result.default_prevented) {
+                self.selected = if self.selected.as_ref() == Some(&action.widget) {
+                    None
+                } else {
+                    Some(action.widget)
+                };
+                changed = true;
+            }
         }
-        result.changed
+        changed
     }
     pub fn focus_window(&mut self, focused: bool) -> bool {
         self.window_focused = focused;
@@ -597,6 +618,7 @@ impl LayoutDemo {
                     | winit::keyboard::NamedKey::F2
                     | winit::keyboard::NamedKey::F3
                     | winit::keyboard::NamedKey::F4
+                    | winit::keyboard::NamedKey::F6
             )
         ) || matches!(key, winit::keyboard::Key::Character(value) if value == " ");
         let single_press = matches!(
@@ -606,6 +628,7 @@ impl LayoutDemo {
                     | winit::keyboard::NamedKey::F2
                     | winit::keyboard::NamedKey::F3
                     | winit::keyboard::NamedKey::F4
+                    | winit::keyboard::NamedKey::F6
             )
         );
         let cancelled =
@@ -625,6 +648,13 @@ impl LayoutDemo {
         }
         if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F4) {
             return pressed && !repeat && !self.unsupported_modifiers() && self.toggle_clip();
+        }
+        if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F6) {
+            if !pressed || repeat || self.unsupported_modifiers() {
+                return false;
+            }
+            self.intercept_activation = !self.intercept_activation;
+            return true;
         }
         if key == &winit::keyboard::Key::Named(winit::keyboard::NamedKey::F2) {
             if !pressed || repeat || self.unsupported_modifiers() {
@@ -704,6 +734,19 @@ impl LayoutDemo {
                         bounds: Rect::from_xywh(0.0, 0.0, viewport.width, viewport.height),
                         color: [0.0, 0.0, 0.0, 1.0],
                     })?;
+                    if self.intercept_activation
+                        && let Some(bounds) = snapshot.visible_bounds(&self.root)
+                    {
+                        painter.quad(Quad {
+                            bounds: Rect::from_xywh(
+                                bounds.origin.x,
+                                bounds.origin.y,
+                                bounds.size.width,
+                                bounds.size.height.min(2.0),
+                            ),
+                            color: [1.0, 0.4, 0.05, 1.0],
+                        })?;
+                    }
                     for node in snapshot.boxes() {
                         painter.with_clip(node.clip, |painter| {
                             let bounds = node.bounds;
@@ -887,6 +930,7 @@ pub(super) fn check(renderer: &mut Renderer) -> Result<(), Box<dyn std::error::E
     focus_checks::check(&mut demo, renderer)?;
     scrollbar_checks::check(&mut demo, renderer)?;
     scroll_chain_checks::check(renderer)?;
+    event_checks::check(&mut demo, renderer)?;
     demo.remove_images(renderer)?;
     demo.reset_gpu();
     demo.prepare(renderer, Size::new(240.0, 450.0), 1.25)?;
@@ -938,6 +982,8 @@ fn opaque_title_pixel(demo: &LayoutDemo) -> (u32, u32) {
     )
 }
 
+#[cfg(test)]
+mod event_tests;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! Persistent UI scene. Updates declare a complete scene or the complete children
 //! of one container. Widget keys are explicit, independent of labels and order.
+pub mod event;
 mod focus;
 pub mod geometry;
 pub mod input;

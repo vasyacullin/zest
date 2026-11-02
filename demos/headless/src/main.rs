@@ -1,4 +1,5 @@
 use zest::Scene;
+use zest::event::{EventControl, EventPhase};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scene = Scene::default();
@@ -32,6 +33,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(scene.label(&status.unwrap()), Some("Ready"));
     println!("Partial update: {stats:?}; scene: {:?}", scene.stats());
     println!("Retained button keeps focus/hover; status sibling remains Ready.");
+    let mut phases = Vec::new();
+    let dispatch = scene
+        .dispatch_focused_event(&mut phases, |ctx, phases| {
+            phases.push(ctx.phase);
+            EventControl::Continue
+        })
+        .unwrap();
+    assert_eq!(
+        phases,
+        [EventPhase::Capture, EventPhase::Target, EventPhase::Bubble]
+    );
+    assert!(dispatch.target_reached && !dispatch.default_prevented);
+    println!("Focused event: {dispatch:?}; identity scopes do not receive events.");
     println!("Headless demo: run zest-quad for the experimental window/GPU slice.");
     Ok(())
 }

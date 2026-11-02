@@ -14,6 +14,7 @@
 //! assert_eq!(physical.size.width, 125.0);
 //! # Ok::<(), zest::geometry::InvalidScaleFactor>(())
 //! ```
+pub use zest_core::event;
 pub use zest_core::geometry;
 pub use zest_core::input;
 pub use zest_core::resource;
